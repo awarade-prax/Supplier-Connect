@@ -1,0 +1,13 @@
+applications:
+  - name: supplier-connect-portal
+    path: .
+    memory: 128M
+    disk_quota: 256M
+    instances: 1
+    buildpacks:
+      - nodejs_buildpack
+    random-route: true
+    services:
+      - supplierportal-smtp-credentials
+    env:
+      NODE_ENV: production

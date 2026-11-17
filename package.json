@@ -1,0 +1,16 @@
+{
+  "name": "supplier-connect-portal",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SAP S/4HANA supplier portal and OData proxy",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.10",
+    "nodemailer": "^10.5.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

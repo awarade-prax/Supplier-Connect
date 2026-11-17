@@ -1,0 +1,105 @@
+{
+  "d": {
+    "results": [
+      {
+        "__metadata": {
+          "id": "https://my426023-api.s4hana.cloud.sap/sap/opu/odata/sap/YY1_SUPPLIER_ONBOARDING_CDS/YY1_SUPPLIERONBOARDINGSTATUS('1')",
+          "uri": "https://my426023-api.s4hana.cloud.sap/sap/opu/odata/sap/YY1_SUPPLIER_ONBOARDING_CDS/YY1_SUPPLIERONBOARDINGSTATUS('1')",
+          "type": "YY1_SUPPLIER_ONBOARDING_CDS.YY1_SUPPLIERONBOARDINGSTATUSType"
+        },
+        "Code": "1",
+        "Description": "Submitted"
+      },
+      {
+        "__metadata": {
+          "id": "https://my426023-api.s4hana.cloud.sap/sap/opu/odata/sap/YY1_SUPPLIER_ONBOARDING_CDS/YY1_SUPPLIERONBOARDINGSTATUS('2')",
+          "uri": "https://my426023-api.s4hana.cloud.sap/sap/opu/odata/sap/YY1_SUPPLIER_ONBOARDING_CDS/YY1_SUPPLIERONBOARDINGSTATUS('2')",
+          "type": "YY1_SUPPLIER_ONBOARDING_CDS.YY1_SUPPLIERONBOARDINGSTATUSType"
+        },
+        "Code": "2",
+        "Description": "Drafted by Supplier"
+      },
+      {
+        "__metadata": {
+          "id": "https://my426023-api.s4hana.cloud.sap/sap/opu/odata/sap/YY1_SUPPLIER_ONBOARDING_CDS/YY1_SUPPLIERONBOARDINGSTATUS('3')",
+          "uri": "https://my426023-api.s4hana.cloud.sap/sap/opu/odata/sap/YY1_SUPPLIER_ONBOARDING_CDS/YY1_SUPPLIERONBOARDINGSTATUS('3')",
+          "type": "YY1_SUPPLIER_ONBOARDING_CDS.YY1_SUPPLIERONBOARDINGSTATUSType"
+        },
+        "Code": "3",
+        "Description": "Under Review of Purchase"
+      },
+      {
+        "__metadata": {
+          "id": "https://my426023-api.s4hana.cloud.sap/sap/opu/odata/sap/YY1_SUPPLIER_ONBOARDING_CDS/YY1_SUPPLIERONBOARDINGSTATUS('4')",
+          "uri": "https://my426023-api.s4hana.cloud.sap/sap/opu/odata/sap/YY1_SUPPLIER_ONBOARDING_CDS/YY1_SUPPLIERONBOARDINGSTATUS('4')",
+          "type": "YY1_SUPPLIER_ONBOARDING_CDS.YY1_SUPPLIERONBOARDINGSTATUSType"
+        },
+        "Code": "4",
+        "Description": "Approved by Purchase"
+      },
+      {
+        "__metadata": {
+          "id": "https://my426023-api.s4hana.cloud.sap/sap/opu/odata/sap/YY1_SUPPLIER_ONBOARDING_CDS/YY1_SUPPLIERONBOARDINGSTATUS('5')",
+          "uri": "https://my426023-api.s4hana.cloud.sap/sap/opu/odata/sap/YY1_SUPPLIER_ONBOARDING_CDS/YY1_SUPPLIERONBOARDINGSTATUS('5')",
+          "type": "YY1_SUPPLIER_ONBOARDING_CDS.YY1_SUPPLIERONBOARDINGSTATUSType"
+        },
+        "Code": "5",
+        "Description": "Rejected by Purchase"
+      },
+      {
+        "__metadata": {
+          "id": "https://my426023-api.s4hana.cloud.sap/sap/opu/odata/sap/YY1_SUPPLIER_ONBOARDING_CDS/YY1_SUPPLIERONBOARDINGSTATUS('6')",
+          "uri": "https://my426023-api.s4hana.cloud.sap/sap/opu/odata/sap/YY1_SUPPLIER_ONBOARDING_CDS/YY1_SUPPLIERONBOARDINGSTATUS('6')",
+          "type": "YY1_SUPPLIER_ONBOARDING_CDS.YY1_SUPPLIERONBOARDINGSTATUSType"
+        },
+        "Code": "6",
+        "Description": "Sent Back by Purchase"
+      },
+      {
+        "__metadata": {
+          "id": "https://my426023-api.s4hana.cloud.sap/sap/opu/odata/sap/YY1_SUPPLIER_ONBOARDING_CDS/YY1_SUPPLIERONBOARDINGSTATUS('7')",
+          "uri": "https://my426023-api.s4hana.cloud.sap/sap/opu/odata/sap/YY1_SUPPLIER_ONBOARDING_CDS/YY1_SUPPLIERONBOARDINGSTATUS('7')",
+          "type": "YY1_SUPPLIER_ONBOARDING_CDS.YY1_SUPPLIERONBOARDINGSTATUSType"
+        },
+        "Code": "7",
+        "Description": "Under Review of Finance"
+      },
+      {
+        "__metadata": {
+          "id": "https://my426023-api.s4hana.cloud.sap/sap/opu/odata/sap/YY1_SUPPLIER_ONBOARDING_CDS/YY1_SUPPLIERONBOARDINGSTATUS('8')",
+          "uri": "https://my426023-api.s4hana.cloud.sap/sap/opu/odata/sap/YY1_SUPPLIER_ONBOARDING_CDS/YY1_SUPPLIERONBOARDINGSTATUS('8')",
+          "type": "YY1_SUPPLIER_ONBOARDING_CDS.YY1_SUPPLIERONBOARDINGSTATUSType"
+        },
+        "Code": "8",
+        "Description": "Approved by Finance"
+      },
+      {
+        "__metadata": {
+          "id": "https://my426023-api.s4hana.cloud.sap/sap/opu/odata/sap/YY1_SUPPLIER_ONBOARDING_CDS/YY1_SUPPLIERONBOARDINGSTATUS('9')",
+          "uri": "https://my426023-api.s4hana.cloud.sap/sap/opu/odata/sap/YY1_SUPPLIER_ONBOARDING_CDS/YY1_SUPPLIERONBOARDINGSTATUS('9')",
+          "type": "YY1_SUPPLIER_ONBOARDING_CDS.YY1_SUPPLIERONBOARDINGSTATUSType"
+        },
+        "Code": "9",
+        "Description": "Rejected by Finance"
+      },
+      {
+        "__metadata": {
+          "id": "https://my426023-api.s4hana.cloud.sap/sap/opu/odata/sap/YY1_SUPPLIER_ONBOARDING_CDS/YY1_SUPPLIERONBOARDINGSTATUS('10')",
+          "uri": "https://my426023-api.s4hana.cloud.sap/sap/opu/odata/sap/YY1_SUPPLIER_ONBOARDING_CDS/YY1_SUPPLIERONBOARDINGSTATUS('10')",
+          "type": "YY1_SUPPLIER_ONBOARDING_CDS.YY1_SUPPLIERONBOARDINGSTATUSType"
+        },
+        "Code": "10",
+        "Description": "Sent Back by Finance"
+      },
+      {
+        "__metadata": {
+          "id": "https://my426023-api.s4hana.cloud.sap/sap/opu/odata/sap/YY1_SUPPLIER_ONBOARDING_CDS/YY1_SUPPLIERONBOARDINGSTATUS('11')",
+          "uri": "https://my426023-api.s4hana.cloud.sap/sap/opu/odata/sap/YY1_SUPPLIER_ONBOARDING_CDS/YY1_SUPPLIERONBOARDINGSTATUS('11')",
+          "type": "YY1_SUPPLIER_ONBOARDING_CDS.YY1_SUPPLIERONBOARDINGSTATUSType"
+        },
+        "Code": "11",
+        "Description": "Overall Approved"
+      }
+    ]
+  }
+}
