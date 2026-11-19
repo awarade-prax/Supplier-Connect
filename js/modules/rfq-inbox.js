@@ -118,9 +118,32 @@
     return {progress:(rfqIndex,rfqCount,rfq,supplierIndex,supplierCount,supplier)=>{progress.textContent=`RFQ ${rfqIndex} of ${rfqCount}: ${rfq} — bidder ${supplierIndex} of ${supplierCount}: ${supplier}`;const percent=Math.round(((rfqIndex-1+supplierIndex/supplierCount)/rfqCount)*100);bar.style.width=`${percent}%`;bar.textContent=`${percent}%`;},add:(rfq,supplier,email,status,message)=>{const key=`${rfq}|${supplier}`;positions.set(key,body.children.length);const row=document.createElement('tr');row.innerHTML=`<td>${esc(rfq)}</td><td>${esc(supplier)}</td><td>${esc(email||'—')}</td><td><span class="rfq-mail-status ${status==='Sent'?'is-sent':status==='Failed'?'is-failed':'is-pending'}">${esc(status)}</span></td><td>${esc(message||'')}</td>`;body.append(row);return key;},update:(key,email,status,message)=>{const row=body.children[positions.get(key)];if(!row)return;row.cells[2].textContent=email||'—';row.cells[3].innerHTML=`<span class="rfq-mail-status ${status==='Sent'?'is-sent':'is-failed'}">${esc(status)}</span>`;row.cells[4].textContent=message||'';},complete:(summary)=>{progress.textContent='Email batch complete.';bar.style.width='100%';bar.textContent='100%';element.querySelector('[data-mail-summary]').textContent=summary;close.disabled=false;}};
   }
 
+  function confirmRfqResend(rfqNumbers) {
+    return new Promise(resolve=>{
+      const root=Portal.$('#dialog-root');
+      root.innerHTML=`<div class="modal fade rfq-resend-modal" tabindex="-1" aria-labelledby="rfq-resend-title" aria-describedby="rfq-resend-description" aria-hidden="true"><div class="modal-dialog modal-dialog-centered"><div class="modal-content"><div class="modal-header border-0 pb-0"><span class="rfq-resend-icon" aria-hidden="true">↻</span><div class="flex-grow-1"><p class="rfq-resend-eyebrow">RFQ already in CBO</p><h2 class="modal-title fs-5" id="rfq-resend-title">Resend invitation?</h2></div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div><div class="modal-body pt-3"><p id="rfq-resend-description">The following RFQ${rfqNumbers.length===1?'':'s'} already ${rfqNumbers.length===1?'Sends Email':'send Email'}:</p><div class="rfq-resend-list">${rfqNumbers.map(number=>`<span>${esc(number)}</span>`).join('')}</div><p class="rfq-resend-note mb-0">If you want to Resend it click on Resend Buttton.</p></div><div class="modal-footer border-0 pt-0"><button type="button" class="button-secondary" data-rfq-resend-cancel>Cancel</button><button type="button" class="button-primary" data-rfq-resend-confirm>Resend Email</button></div></div></div></div>`;
+      const element=root.firstElementChild;const modal=bootstrap.Modal.getOrCreateInstance(element,{backdrop:'static',keyboard:false});let confirmed=false;
+      element.querySelector('[data-rfq-resend-confirm]').addEventListener('click',()=>{confirmed=true;modal.hide()});
+      element.querySelector('[data-rfq-resend-cancel]').addEventListener('click',()=>modal.hide());
+      element.addEventListener('hidden.bs.modal',()=>{root.replaceChildren();resolve(confirmed)},{once:true});
+      modal.show();
+    });
+  }
+
   async function sendBatch(rfqRows,content) {
     if(!rfqRows.length)return;
-    const email=createEmailDialog(content);let sent=0,failed=0,recipientCount=0;
+    const rfqNumbers=[...new Set(rfqRows.map(row=>String(row.RequestForQuotation||'').trim()).filter(Boolean))];
+    let existingRfqs=new Set();
+    try {
+      const response=await fetch('/api/rfq/email-status',{method:'POST',headers:{'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify({rfqNumbers})});
+      const result=await response.json().catch(()=>({}));if(!response.ok)throw new Error(result.error||`Could not check previous invitation status (${response.status}).`);
+      existingRfqs=new Set(Array.isArray(result.existingRfqs)?result.existingRfqs:[]);
+    } catch(error) {
+      const message=content.querySelector('.rfq-message');if(message)message.textContent=`Could not check previous invitation status: ${error.message}`;return;
+    }
+    const duplicates=rfqNumbers.filter(number=>existingRfqs.has(number));
+    if(duplicates.length&&!(await confirmRfqResend(duplicates)))return;
+    const email=createEmailDialog(content);let sent=0,failed=0,trackingFailed=0,recipientCount=0;
     try {
       for(const [rfqIndex,rfq] of rfqRows.entries()) {
         const number=String(rfq.RequestForQuotation||'');
@@ -133,15 +156,15 @@
             const supplierNumber=String(bidder.Supplier).trim();const key=email.add(number,supplierNumber,'','Processing','Sending invitation…');recipientCount++;
             email.progress(rfqIndex+1,rfqRows.length,number,supplierIndex+1,suppliers.length,supplierNumber);
             try {
-              const response=await fetch('/api/mail/send-rfq-invitation',{method:'POST',headers:{'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify({rfqNumber:number,supplierNumber,quotationDeadline:dateValue(rfq.QuotationDeadline)})});
-              const result=await response.json().catch(()=>({}));if(!response.ok)throw new Error(result.error||result.message||`Mail service responded with status ${response.status}.`);
+              const response=await fetch('/api/mail/send-rfq-invitation',{method:'POST',headers:{'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify({rfqNumber:number,supplierNumber,quotationDeadline:dateValue(rfq.QuotationDeadline),resend:existingRfqs.has(number)})});
+              const result=await response.json().catch(()=>({}));if(!response.ok){const error=new Error(result.error||result.message||`Mail service responded with status ${response.status}.`);error.emailSent=Boolean(result.emailSent);error.email=result.email||'';throw error;}
               email.update(key,result.email||'', 'Sent', result.message||'Invitation sent successfully.');sent++;
-            } catch(error) { email.update(key,'','Failed',error.message||'An unexpected error occurred.');failed++; }
+            } catch(error) { if(error.emailSent){email.update(key,error.email,'Sent',error.message);sent++;trackingFailed++;}else{email.update(key,'','Failed',error.message||'An unexpected error occurred.');failed++;} }
           }
         } catch(error) { email.add(number,'—','—','Failed',error.message||'Could not read RFQ bidders.');failed++; }
       }
     } finally {
-      email.complete(`${rfqRows.length} RFQ${rfqRows.length===1?'':'s'} processed · ${sent} sent · ${failed} failed${recipientCount?' · '+recipientCount+' bidder invitations':''}`);
+      email.complete(`${rfqRows.length} RFQ${rfqRows.length===1?'':'s'} processed · ${sent} sent · ${failed} failed${trackingFailed?` · ${trackingFailed} CBO tracking update${trackingFailed===1?'':'s'} failed`:''}${recipientCount?' · '+recipientCount+' bidder invitations':''}`);
       remembered.selected.clear();
       content.querySelectorAll('[data-rfq-check]').forEach(input=>{input.checked=false});
       const selectPage=content.querySelector('[data-rfq-select-page]');if(selectPage){selectPage.checked=false;selectPage.indeterminate=false;}
