@@ -47,19 +47,21 @@
     if (['4','7'].includes(String(status))) return {name:'Finance',actions:['Approved','Rejected','Sent Back']};
     return null;
   }
-  async function renderList(content, back, notice='') {
+  async function renderList(content, back, notice='', selectedUuid='') {
     Portal.$('#page-title').textContent='Supplier Onboardings';
     Portal.$('#page-subtitle').textContent='Supplier approval records';
     Portal.$('#view-label').textContent='SUPPLIER APPROVALS';
     content.innerHTML=`<div class="approval-toolbar"><button type="button" class="button-secondary" data-approval-back>‹ &nbsp;Return to Supplier Registration</button><button type="button" class="button-secondary" data-refresh-list>Refresh</button></div>${notice?`<div class="alert alert-warning" role="status">${esc(notice)}</div>`:''}<section class="card approval-list-card"><div class="approval-list-heading"><div><h2>Supplier Onboardings</h2><p>Search and review supplier registration records.</p></div><div class="approval-filterbar"><label class="approval-search"><span class="visually-hidden">Search onboardings</span><input type="search" class="form-control" placeholder="Search supplier, ID or status" data-approval-search></label><label class="approval-status-filter"><span>Status</span><select class="form-select" data-status-filter><option value="">All statuses</option>${statusOptions.map(([code,label])=>`<option value="${code}">${esc(label)}</option>`).join('')}</select></label></div></div><div class="approval-message" role="status" aria-live="polite">Loading supplier onboardings…</div><div class="approval-table-wrap"><table class="table approval-table"><thead><tr><th>Request ID</th><th>Supplier Name</th><th>Email</th><th>Purchasing Organization</th><th>Status</th><th>Submitted</th><th><span class="visually-hidden">Details</span></th></tr></thead><tbody data-approval-rows></tbody></table></div><div class="approval-pagination"><button type="button" class="button-secondary" data-page-previous disabled>Previous</button><span data-page-label>Page 1</span><button type="button" class="button-secondary" data-page-next disabled>Next</button></div></section>`;
     content.querySelector('[data-approval-back]').addEventListener('click',back);
     content.querySelector('[data-refresh-list]').addEventListener('click',()=>load());
-    let currentQuery='?$top=50&$orderby=SAP_CreatedDateTime%20desc';let nextQuery='';let pageNumber=1;const previousQueries=[];let debounce;let loadSequence=0;
+    let currentQuery=selectedUuid&&/^[\da-f-]{36}$/i.test(selectedUuid)?`?$filter=${encodeURIComponent(`SAP_UUID eq guid'${selectedUuid}'`)}&$top=1`:'?$top=50&$orderby=SAP_CreatedDateTime%20desc';let nextQuery='';let pageNumber=1;const previousQueries=[];let debounce;let loadSequence=0;let restoredDetail=false;
     function renderRows(shown){
       const tbody=content.querySelector('[data-approval-rows]');
       tbody.innerHTML=shown.map(row=>`<tr><td>${esc(value(row.REQID||row.ID))}</td><td>${esc(value(row.SupplierName))}</td><td>${esc(value(row.SupplierEmail))}</td><td>${esc(value(row.PurchasingOrganization))}</td><td><span class="approval-status" data-status="${esc(String(row.Status||'1'))}">${esc(statusFor(row))}</span></td><td>${esc(dateFor(row.SAP_CreatedDateTime))}</td><td><button type="button" class="approval-open" aria-label="Open ${esc(value(row.SupplierName))} details" data-record-uuid="${esc(row.SAP_UUID||'')}">›</button></td></tr>`).join('');
       content.querySelector('.approval-message').textContent=shown.length?`Showing ${shown.length} onboarding record${shown.length===1?'':'s'} on this page.`:'No supplier onboardings found.';
-      tbody.querySelectorAll('[data-record-uuid]').forEach(button=>button.addEventListener('click',()=>{const selected=records.find(row=>row.SAP_UUID===button.dataset.recordUuid);if(selected)renderDetail(content,selected,back)}));
+      const openRecord=uuid=>{const selected=records.find(row=>row.SAP_UUID===uuid);if(selected){Portal.setRoute('registration','Supplier Approvals',selected.SAP_UUID);renderDetail(content,selected,()=>{Portal.setRoute('registration','Supplier Approvals');renderList(content,back)})}};
+      tbody.querySelectorAll('tr').forEach(tr=>tr.addEventListener('click',event=>{if(event.target.closest('button,a,input,select,textarea,label'))return;openRecord(tr.querySelector('[data-record-uuid]')?.dataset.recordUuid)}));
+      tbody.querySelectorAll('[data-record-uuid]').forEach(button=>button.addEventListener('click',()=>openRecord(button.dataset.recordUuid)));
     }
     let records=[];
     content.querySelector('[data-page-previous]').addEventListener('click',()=>{if(!previousQueries.length)return;currentQuery=previousQueries.pop();pageNumber=Math.max(1,pageNumber-1);load(currentQuery,false)});
@@ -82,18 +84,20 @@
         const nextLink=unwrapped?.__next||data?.__next||'';nextQuery='';
         if(nextLink){const link=new URL(nextLink,location.origin);const params=new URLSearchParams();const token=link.searchParams.get('$skiptoken');const skip=link.searchParams.get('$skip');if(token)params.set('$skiptoken',token);else if(skip)params.set('$skip',skip);const filter=link.searchParams.get('$filter');if(filter)params.set('$filter',filter);params.set('$top','50');const order=link.searchParams.get('$orderby');if(order)params.set('$orderby',order);nextQuery=`?${params.toString()}`}
         renderRows(records);content.querySelector('[data-page-next]').disabled=!nextQuery;content.querySelector('[data-page-previous]').disabled=previousQueries.length===0;content.querySelector('[data-page-label]').textContent=`Page ${pageNumber}`;
+        if(selectedUuid&&!restoredDetail){restoredDetail=true;const selected=records.find(row=>String(row.SAP_UUID).toLowerCase()===selectedUuid.toLowerCase());if(selected)renderDetail(content,selected,()=>{Portal.setRoute('registration','Supplier Approvals');renderList(content,back)})}
       }catch(error){if(sequence!==loadSequence||!content.querySelector('.approval-list-card'))return;message.textContent=`Could not load supplier onboardings: ${error.message}`;content.querySelector('[data-approval-rows]').replaceChildren()}
     }
     await load();
   }
 
   async function renderDetail(content,parent,back){
+    Portal.setRoute('registration','Supplier Approvals',parent.SAP_UUID);
     Portal.$('#page-title').textContent=`${parent.SupplierName||'Supplier'} — Onboarding Details`;
     Portal.$('#page-subtitle').textContent=`Request ${parent.REQID||parent.ID||''}`;
     Portal.$('#view-label').textContent='SUPPLIER APPROVALS';
     const stage=approvalStage(parent.Status);
     content.innerHTML=`<div class="approval-toolbar"><button type="button" class="button-secondary" data-list-back>‹ &nbsp;Back to Supplier Onboardings</button><div class="approval-toolbar-actions">${stage?stage.actions.map(action=>`<button type="button" class="${action==='Approved'?'button-primary':'button-secondary'}" data-open-decision="${action}">${action==='Approved'?'Approve':action==='Rejected'?'Reject':'Send Back'}</button>`).join(''):''}</div></div><div class="approval-detail-summary card"><div>${cell('Supplier Name',parent.SupplierName)}${cell('Supplier Email',parent.SupplierEmail)}${cell('Purchasing Organization',parent.PurchasingOrganization)}${cell('Supplier Category',parent.SupplierCategory)}${cell('Request ID',parent.REQID||parent.ID)}${cell('Submitted',dateFor(parent.SAP_CreatedDateTime))}</div><span class="approval-status" data-status="${esc(String(parent.Status||'1'))}">${esc(statusFor(parent))}</span></div><div class="approval-detail-grid-layout"><div class="approval-detail-loading" role="status">Loading supplier details…</div></div><div class="modal fade" tabindex="-1" aria-labelledby="approval-modal-title" aria-hidden="true" data-approval-modal><div class="modal-dialog modal-dialog-centered"><div class="modal-content"><div class="modal-header"><h2 class="modal-title fs-5" id="approval-modal-title">Confirm decision</h2><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div><div class="modal-body"><section class="approval-modal-description"><strong data-decision-summary></strong><p data-decision-description></p></section><label for="approval-comment" class="form-label">Comment <span class="text-secondary">(optional, up to 500 characters)</span></label><textarea class="form-control" id="approval-comment" maxlength="500" rows="4" placeholder="Add a comment for the supplier"></textarea><div class="approval-modal-message" role="status" aria-live="polite"></div></div><div class="modal-footer"><button type="button" class="button-secondary" data-bs-dismiss="modal">Cancel</button><button type="button" class="button-primary" data-confirm-decision>Confirm</button></div></div></div></div>`;
-    content.querySelector('[data-list-back]').addEventListener('click',()=>renderList(content,back));
+    content.querySelector('[data-list-back]').addEventListener('click',back);
     const modalElement=content.querySelector('[data-approval-modal]');const modal=bootstrap.Modal.getOrCreateInstance(modalElement);let selectedDecision='';
     const descriptions={Approved:stage?.name==='Finance'?'Finance approval will create the supplier as a Business Partner in SAP.':'Purchase approval will move this onboarding to Finance review.',Rejected:'This decision rejects the onboarding at the current review stage.', 'Sent Back':'This decision returns the onboarding to the supplier for corrections.'};
     content.querySelectorAll('[data-open-decision]').forEach(button=>button.addEventListener('click',()=>{selectedDecision=button.dataset.openDecision;content.querySelector('[data-decision-summary]').textContent=`${stage.name}: ${selectedDecision==='Approved'?'Approve':selectedDecision==='Rejected'?'Reject':'Send Back'} ${parent.SupplierName||'this supplier'}?`;content.querySelector('[data-decision-description]').textContent=descriptions[selectedDecision];content.querySelector('[data-confirm-decision]').disabled=false;content.querySelector('.approval-modal-message').textContent='';content.querySelector('#approval-comment').value='';modal.show()}));
@@ -107,6 +111,7 @@
         const result=await response.json().catch(()=>({}));
         if(!response.ok)throw new Error(result.error||`Approval could not be saved (${response.status}).`);
         const hidden=new Promise(resolve=>modalElement.addEventListener('hidden.bs.modal',resolve,{once:true}));modal.hide();await hidden;
+        Portal.setRoute('registration','Supplier Approvals');
         await renderList(content,back,result.creationError?`Finance approval was saved, but SAP supplier creation needs attention: ${result.creationError}`:'');
       }catch(error){message.textContent=error.message;confirm.disabled=false}
     }

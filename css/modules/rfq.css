@@ -35,3 +35,15 @@ body[data-module='rfq'] .tile-icon{background:rgba(18,60,97,.08);color:#123c61}
 .rfq-items-table{min-width:1800px}
 .rfq-bidders-table{min-width:760px}
 .rfq-table tbody td{white-space:nowrap}
+.rfq-quote-grid{display:grid;grid-template-columns:repeat(3,minmax(180px,1fr));gap:12px;margin-bottom:20px}.rfq-quote-grid label{display:grid;gap:5px;color:#40576e;font-size:13px;font-weight:650}.rfq-quote-grid .wide{grid-column:1/-1}.rfq-quote-form h2{font-size:18px;color:#172f46}.rfq-quote-items{min-width:1050px}.rfq-quote-items input{min-width:110px}.rfq-quote-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}.rfq-quote-form textarea{resize:vertical}
+@media(max-width:760px){.rfq-quote-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:540px){.rfq-quote-grid{grid-template-columns:1fr}.rfq-quote-grid .wide{grid-column:auto}.rfq-quote-actions{flex-direction:column-reverse}.rfq-quote-actions button{width:100%}}
+
+/* Keep list selection and detail actions visible while scrolling wide tables. */
+.rfq-list-table th:last-child,.rfq-list-table td:last-child{position:sticky;right:0;z-index:2;background:#fff;box-shadow:-5px 0 8px -7px #123c6166}
+.rfq-list-table thead th:last-child{z-index:4;background:#f1f4f7}
+.rfq-selectable-table th:first-child,.rfq-selectable-table td:first-child{position:sticky;left:0;z-index:2;background:#fff;box-shadow:5px 0 8px -7px #123c6166}
+.rfq-selectable-table thead th:first-child{z-index:4;background:#f1f4f7}
+.rfq-list-table tbody tr{cursor:pointer}
+.rfq-list-table tbody tr td:last-child{cursor:default}
+

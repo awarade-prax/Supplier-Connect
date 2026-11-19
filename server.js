@@ -11,6 +11,7 @@ const ROOT = __dirname;
 const SERVICE_ROOT = (process.env.SAP_ODATA_SERVICE_ROOT || 'https://my426023-api.s4hana.cloud.sap/sap/opu/odata/sap/YY1_SUPPLIER_ONBOARDING_CDS').replace(/\/$/, '');
 const BP_SERVICE_ROOT = (process.env.SAP_BP_ODATA_SERVICE_ROOT || `${new URL(SERVICE_ROOT).origin}/sap/opu/odata/sap/API_BUSINESS_PARTNER`).replace(/\/$/, '');
 const RFQ_SERVICE_ROOT = (process.env.SAP_RFQ_ODATA_SERVICE_ROOT || `${new URL(SERVICE_ROOT).origin}/sap/opu/odata/sap/Z_RFQ_SUPP_PORTAL_SB`).replace(/\/$/, '');
+const RFQ_PORTAL_SERVICE_ROOT = (process.env.SAP_RFQ_PORTAL_ODATA_SERVICE_ROOT || `${new URL(SERVICE_ROOT).origin}/sap/opu/odata/sap/YY1_RFQ_PORTAL_CDS`).replace(/\/$/, '');
 const SAP_USERNAME = process.env.SAP_USERNAME || '';
 const SAP_PASSWORD = process.env.SAP_PASSWORD || '';
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '';
@@ -125,6 +126,101 @@ async function readSapCollection(serviceRoot, entitySet, query) {
   const response = await fetch(`${serviceRoot}/${entitySet}${query}`, { headers: sapAuthHeaders(), redirect: 'follow' });
   const data = await sapJson(response, `SAP read ${entitySet}`);
   return Array.isArray(data?.results) ? data.results : Array.isArray(data) ? data : data ? [data] : [];
+}
+
+async function resolveRfqSupplierByAccessToken(accessToken) {
+  const parent = await getSupplierByAccessToken(accessToken);
+  if (!parent?.SAP_UUID) throw Object.assign(new Error('The supplier invitation token is invalid.'), { statusCode: 401 });
+  const filter = `SAP_PARENT_UUID eq guid'${String(parent.SAP_UUID).toLowerCase()}'`;
+  const records = await readSapCollection(SERVICE_ROOT, 'YY1_SAPCREATION_SUPPLIER_ONBOA', `?$filter=${encodeURIComponent(filter)}&$select=SupplierNumber,BPNumber&$top=10`);
+  const supplierNumber = String(records.find(record => record.SupplierNumber)?.SupplierNumber || records.find(record => record.BPNumber)?.BPNumber || '').trim();
+  if (!supplierNumber) throw Object.assign(new Error('This supplier invitation is not linked to an SAP supplier number yet.'), { statusCode: 409 });
+  return { parent, supplierNumber };
+}
+
+async function saveSupplierQuotation(req, res, cors) {
+  const token = String(req.headers['x-supplier-access-token'] || '');
+  if (!token) return send(res, 401, JSON.stringify({ error: 'A supplier invitation token is required.' }), undefined, cors);
+  if (!SAP_USERNAME || !SAP_PASSWORD) return send(res, 503, JSON.stringify({ error: 'SAP credentials are missing.' }), undefined, cors);
+  try {
+    const { supplierNumber } = await resolveRfqSupplierByAccessToken(token);
+    const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+    const rfqNumber = String(body.RFQNumber || '').trim();
+    if (!rfqNumber || rfqNumber.length > 10) return send(res, 400, JSON.stringify({ error: 'Select a valid RFQ number.' }), undefined, cors);
+    const bidderFilter = `RequestForQuotation eq '${rfqNumber.replace(/'/g, "''")}' and Supplier eq '${supplierNumber.replace(/'/g, "''")}'`;
+    if (!(await readSapCollection(RFQ_SERVICE_ROOT, 'RFQ_Bidder', `?$filter=${encodeURIComponent(bidderFilter)}&$top=1`)).length)
+      return send(res, 403, JSON.stringify({ error: 'This RFQ is not assigned to your supplier account.' }), undefined, cors);
+    const rfqHeaders = await readSapCollection(RFQ_SERVICE_ROOT, 'RFQ_Header', `?$filter=${encodeURIComponent(`RequestForQuotation eq '${rfqNumber.replace(/'/g, "''")}'`)}&$top=1`);
+    const rfqHeader = rfqHeaders[0] || {};
+    const status = body.Status === '03' ? '03' : '02';
+    const allowedHeader = ['PaymentTerms','SupplyLocation','QuotationValidTill','RFQdueDate','Currency','FreightIncoterms','HeaderRemarks','SAP_Description'];
+    const header = { RFQNumber: rfqNumber, Supplier: supplierNumber, Status: status };
+    for (const field of allowedHeader) if (body[field] !== undefined && body[field] !== '') header[field] = body[field];
+    header.Currency = String(rfqHeader.DocumentCurrency || header.Currency || '').slice(0, 5);
+    const dueDateValue = rfqHeader.QuotationDeadline;
+    if (dueDateValue) {
+      const dueMatch = String(dueDateValue).match(/^\/Date\((-?\d+)/);
+      const dueDate = dueMatch ? new Date(Number(dueMatch[1])) : new Date(dueDateValue);
+      if (!Number.isNaN(dueDate.getTime())) header.RFQdueDate = dueDate.toISOString().slice(0, 10);
+    }
+    const items = Array.isArray(body.Items) ? body.Items.slice(0, 500).map(item => {
+      const result = {};
+      for (const field of ['RFQItem','MaterialDescription','QuotedQuantity','RequestedQuantity','Price','DeliveryDate','SpecialConditions']) if (item[field] !== undefined && item[field] !== '') result[field] = item[field];
+      return result;
+    }) : [];
+    const csrf = await getCsrf('YY1_RFQ_PORTAL', RFQ_PORTAL_SERVICE_ROOT);
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(header)) {
+      const literal = key === 'QuotationValidTill' || key === 'RFQdueDate'
+        ? `datetime'${String(value).slice(0, 10)}T00:00:00'`
+        : `'${String(value).replace(/'/g, "''")}'`;
+      params.set(key, literal);
+    }
+    const upstream = await fetch(`${RFQ_PORTAL_SERVICE_ROOT}/YY1_RFQ_PORTALSap_upsert?${params}`, { method: 'POST', headers: { ...sapAuthHeaders(), 'X-CSRF-Token': csrf.token, ...(csrf.cookies ? { Cookie: csrf.cookies } : {}), 'Content-Type': 'application/json' }, body: '{}' });
+    const saved = await sapJson(upstream, 'Save quotation header');
+    const uuid = String(saved?.SAP_UUID || '');
+    if (items.length && !uuid) throw new Error('SAP saved the quotation header but did not return its UUID, so quotation items were not saved.');
+    if (items.length) {
+      for (const item of items) {
+        const response = await fetch(`${RFQ_PORTAL_SERVICE_ROOT}/YY1_RFQ_PORTAL(guid'${uuid}')/to_ItemNode`, { method: 'POST', headers: { ...sapAuthHeaders(), 'X-CSRF-Token': csrf.token, ...(csrf.cookies ? { Cookie: csrf.cookies } : {}), 'Content-Type': 'application/json' }, body: JSON.stringify(item) });
+        await sapJson(response, 'Save quotation item');
+      }
+    }
+    return send(res, 200, JSON.stringify({ success: true, status, record: saved }), undefined, cors);
+  } catch (error) {
+    return send(res, error.statusCode || 502, JSON.stringify({ error: error.statusCode ? error.message : error.message || 'Quotation could not be saved.' }), undefined, cors);
+  }
+}
+
+async function readSupplierRfqPage(supplierNumber, query) {
+  const quoteValue = value => String(value || '').replace(/'/g, "''");
+  const url = new URL(`${RFQ_SERVICE_ROOT}/RFQ_Bidder`);
+  const params = new URLSearchParams(query || '');
+  const suppliedFilter = params.get('$filter');
+  const bidderFilter = `Supplier eq '${quoteValue(supplierNumber)}'`;
+  params.set('$filter', suppliedFilter ? `(${bidderFilter}) and (${suppliedFilter})` : bidderFilter);
+  params.set('$select', 'RequestForQuotation,Supplier,SupplierName,PartnerFunction,PartnerCounter');
+  params.set('$orderby', 'RequestForQuotation desc');
+  params.set('$inlinecount', 'allpages');
+  const top = Math.min(Math.max(Number(params.get('$top')) || 50, 1), 100);
+  const skip = Math.min(Math.max(Number(params.get('$skip')) || 0, 0), 1000000);
+  params.set('$top', String(top));
+  params.set('$skip', String(skip));
+  url.search = params.toString();
+  const response = await fetch(url, { headers: sapAuthHeaders(), redirect: 'follow' });
+  const page = await sapJson(response, 'SAP supplier RFQ lookup');
+  const bidders = Array.isArray(page?.results) ? page.results : [];
+  const requestNumbers = [...new Set(bidders.map(row => String(row.RequestForQuotation || '').trim()).filter(Boolean))];
+  const headers = [];
+  for (let index = 0; index < requestNumbers.length; index += 20) {
+    const batch = requestNumbers.slice(index, index + 20);
+    const filter = batch.map(number => `RequestForQuotation eq '${quoteValue(number)}'`).join(' or ');
+    headers.push(...await readSapCollection(RFQ_SERVICE_ROOT, 'RFQ_Header', `?$filter=${encodeURIComponent(filter)}&$top=20`));
+  }
+  const byNumber = new Map(headers.map(row => [String(row.RequestForQuotation), row]));
+  const results = requestNumbers.map(number => byNumber.get(number)).filter(Boolean);
+  const count = Number(page?.__count || skip + bidders.length);
+  return { d: { results, __count: String(count) } };
 }
 
 async function resolveRfqSupplier(rfqNumber, supplierNumber) {
@@ -509,6 +605,28 @@ async function authorizeOData(req, url, odata) {
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  if (url.pathname === '/api/rfq/quotation') {
+    const cors = corsHeaders(req);
+    if (req.method === 'OPTIONS') { res.writeHead(204, { ...cors, 'Access-Control-Max-Age': '600' }); return res.end(); }
+    if (req.method !== 'POST') return send(res, 405, JSON.stringify({ error: 'POST is required.' }), undefined, cors);
+    return saveSupplierQuotation(req, res, cors);
+  }
+  if (url.pathname === '/api/rfq/supplier') {
+    const cors = corsHeaders(req);
+    if (req.method === 'OPTIONS') { res.writeHead(204, { ...cors, 'Access-Control-Max-Age': '600' }); return res.end(); }
+    if (req.method !== 'GET') return send(res, 405, JSON.stringify({ error: 'Supplier RFQ access is read-only.' }), undefined, cors);
+    if (!SAP_USERNAME || !SAP_PASSWORD) return send(res, 503, JSON.stringify({ error: 'SAP credentials are missing. Configure SAP_USERNAME and SAP_PASSWORD on the server.' }), undefined, cors);
+    const token = String(req.headers['x-supplier-access-token'] || '');
+    if (!token) return send(res, 401, JSON.stringify({ error: 'A supplier invitation token is required.' }), undefined, cors);
+    try {
+      const { supplierNumber } = await resolveRfqSupplierByAccessToken(token);
+      const page = await readSupplierRfqPage(supplierNumber, url.search);
+      return send(res, 200, JSON.stringify(page), undefined, cors);
+    } catch (error) {
+      return send(res, error.statusCode || 502, JSON.stringify({ error: error.statusCode ? error.message : 'Supplier RFQ records could not be loaded from SAP.' }), undefined, cors);
+    }
+  }
+
   if (url.pathname.startsWith('/api/rfq/odata/')) {
     const cors = corsHeaders(req);
     if (req.method === 'OPTIONS') { res.writeHead(204, { ...cors, 'Access-Control-Max-Age': '600' }); return res.end(); }
@@ -519,7 +637,30 @@ const server = http.createServer(async (req, res) => {
     catch { return send(res, 400, JSON.stringify({ error: 'Invalid RFQ entity path encoding.' }), undefined, cors); }
     if (!RFQ_ENTITY_SETS.has(entity)) return send(res, 404, JSON.stringify({ error: 'Unknown RFQ entity set.' }), undefined, cors);
     try {
-      const upstream = await fetch(`${RFQ_SERVICE_ROOT}/${entity}${url.search}`, {
+      let upstreamUrl = `${RFQ_SERVICE_ROOT}/${entity}${url.search}`;
+      const supplierToken = String(req.headers['x-supplier-access-token'] || '');
+      if (supplierToken) {
+        const { supplierNumber } = await resolveRfqSupplierByAccessToken(supplierToken);
+        const suppliedFilter = url.searchParams.get('$filter') || '';
+        if (entity === 'RFQ_Bidder') {
+          const params = new URLSearchParams(url.searchParams);
+          const supplierFilter = `Supplier eq '${String(supplierNumber).replace(/'/g, "''")}'`;
+          params.set('$filter', suppliedFilter ? `(${supplierFilter}) and (${suppliedFilter})` : supplierFilter);
+          upstreamUrl = `${RFQ_SERVICE_ROOT}/${entity}?${params}`;
+        } else {
+          const requestMatch = suppliedFilter.match(/RequestForQuotation\s+eq\s+'((?:[^']|'')+)'/i);
+          if (!requestMatch) return send(res, 400, JSON.stringify({ error: 'Supplier RFQ details require a specific RFQ number.' }), undefined, cors);
+          const requestedNumber = requestMatch[1].replace(/''/g, "'");
+          const bidderFilter = `RequestForQuotation eq '${String(requestedNumber).replace(/'/g, "''")}' and Supplier eq '${String(supplierNumber).replace(/'/g, "''")}'`;
+          const assigned = await readSapCollection(RFQ_SERVICE_ROOT, 'RFQ_Bidder', `?$filter=${encodeURIComponent(bidderFilter)}&$top=1`);
+          if (!assigned.length) return send(res, 403, JSON.stringify({ error: 'This RFQ is not assigned to this supplier.' }), undefined, cors);
+          const params = new URLSearchParams(url.searchParams);
+          const boundFilter = `RequestForQuotation eq '${String(requestedNumber).replace(/'/g, "''")}'`;
+          params.set('$filter', suppliedFilter ? `(${boundFilter}) and (${suppliedFilter})` : boundFilter);
+          upstreamUrl = `${RFQ_SERVICE_ROOT}/${entity}?${params}`;
+        }
+      }
+      const upstream = await fetch(upstreamUrl, {
         headers: { Accept: req.headers.accept || 'application/json', Authorization: `Basic ${Buffer.from(`${SAP_USERNAME}:${SAP_PASSWORD}`).toString('base64')}` },
         redirect: 'follow'
       });
@@ -615,7 +756,7 @@ const server = http.createServer(async (req, res) => {
       const supplierName = cleanHeader(payload.supplierName) || 'Supplier';
       const senderName = cleanHeader(config.SMTP_SENDER_NAME) || 'Supplier Portal';
       const baseUrl = process.env.PORTAL_BASE_URL || `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000'}`;
-      const portalUrl = `${baseUrl.replace(/\/$/, '')}/?token=${encodeURIComponent(payload.accessToken)}`;
+      const portalUrl = `${baseUrl.replace(/\/$/, '')}/?token=${encodeURIComponent(payload.accessToken)}#/registration/complete-registration`;
       const detail = (label, value) => `<p><b>${label}:</b> ${escapeHtml(value || '-')}</p>`;
       await transporter.sendMail({
         from: `"${senderName}" <${config.SMTP_USER}>`, to: email,
@@ -652,7 +793,7 @@ const server = http.createServer(async (req, res) => {
       const supplierName = cleanHeader(supplier.name).slice(0, 80) || 'Supplier';
       const senderName = cleanHeader(config.SMTP_SENDER_NAME) || 'Supplier Portal';
       const baseUrl = process.env.PORTAL_BASE_URL || `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000'}`;
-      const portalUrl = `${baseUrl.replace(/\/$/, '')}/?token=${encodeURIComponent(supplier.token)}`;
+      const portalUrl = `${baseUrl.replace(/\/$/, '')}/?token=${encodeURIComponent(supplier.token)}#/rfq/rfq-inbox/${encodeURIComponent(rfqNumber)}`;
       const deadline = cleanHeader(payload.quotationDeadline).slice(0, 80) || 'the stated deadline';
       const subject = cleanHeader(`Submit Your Quotation for RFQ - ${rfqNumber}`);
       await transporter.sendMail({

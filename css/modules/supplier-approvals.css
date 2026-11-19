@@ -69,3 +69,10 @@
 .approval-detail-card h2{margin-bottom:12px}
 .approval-detail-grid{gap:11px 16px}
 .approval-table tbody td{white-space:nowrap}
+
+/* Keep the detail action visible in the horizontally scrollable list. */
+.approval-table th:last-child,.approval-table td:last-child{position:sticky;right:0;z-index:2;background:#fff;box-shadow:-5px 0 8px -7px #123c6166}
+.approval-table thead th:last-child{z-index:4;background:#f1f4f7}
+.approval-table tbody tr{cursor:pointer}
+.approval-table tbody tr td:last-child{cursor:default}
+
