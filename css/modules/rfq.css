@@ -38,6 +38,17 @@ body[data-module='rfq'] .tile-icon{background:rgba(18,60,97,.08);color:#123c61}
 .rfq-quote-grid{display:grid;grid-template-columns:repeat(3,minmax(180px,1fr));gap:12px;margin-bottom:20px}.rfq-quote-grid label{display:grid;gap:5px;color:#40576e;font-size:13px;font-weight:650}.rfq-quote-grid .wide{grid-column:1/-1}.rfq-quote-form h2{font-size:18px;color:#172f46}.rfq-quote-items{min-width:1050px}.rfq-quote-items input{min-width:110px}.rfq-quote-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}.rfq-quote-form textarea{resize:vertical}
 @media(max-width:760px){.rfq-quote-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:540px){.rfq-quote-grid{grid-template-columns:1fr}.rfq-quote-grid .wide{grid-column:auto}.rfq-quote-actions{flex-direction:column-reverse}.rfq-quote-actions button{width:100%}}
+.rfq-resend-modal .modal-content{border:0;border-radius:16px;box-shadow:0 20px 60px #102f4b38;overflow:hidden}
+.rfq-resend-modal .modal-header{align-items:center;gap:14px;padding:24px 24px 0}
+.rfq-resend-icon{display:grid;place-items:center;flex:0 0 46px;width:46px;height:46px;border-radius:14px;background:linear-gradient(135deg,#eaf2fb,#dceaf8);color:#123c61;font-size:27px;font-weight:700}
+.rfq-resend-eyebrow{margin:0 0 3px;color:#52708b;font-size:11px;font-weight:750;letter-spacing:.08em;text-transform:uppercase}
+.rfq-resend-modal .modal-title{color:#172f46;font-weight:700}
+.rfq-resend-modal .modal-body{padding:18px 24px 20px;color:#40576e}
+.rfq-resend-list{display:flex;flex-wrap:wrap;gap:7px;margin:0 0 16px}
+.rfq-resend-list span{padding:6px 11px;border:1px solid #d5e2ef;border-radius:999px;background:#f3f7fb;color:#123c61;font-size:13px;font-weight:700}
+.rfq-resend-note{padding:11px 13px;border-left:3px solid #e6ad3b;border-radius:4px;background:#fff8e9;color:#705824;font-size:12px;line-height:1.55}
+.rfq-resend-modal .modal-footer{gap:9px;padding:0 24px 22px}
+@media(max-width:480px){.rfq-resend-modal .modal-header{padding:18px 18px 0}.rfq-resend-modal .modal-body{padding:16px 18px}.rfq-resend-modal .modal-footer{padding:0 18px 18px}.rfq-resend-modal .modal-footer button{flex:1}}
 
 /* Keep list selection and detail actions visible while scrolling wide tables. */
 .rfq-list-table th:last-child,.rfq-list-table td:last-child{position:sticky;right:0;z-index:2;background:#fff;box-shadow:-5px 0 8px -7px #123c6166}
