@@ -1,7 +1,7 @@
 (() => {
   const esc = Portal.escapeHtml;
   const pageSize = 50;
-  const headerFields = 'RequestForQuotation,RFQType,RFQDescription,Language,PurchasingOrganization,PurchasingGroup,CompanyCode,DocumentCurrency,PublishingDate,QuotationDeadline,FollowOnDocumentType,CreatedBy,USerFullName,CreationDate,TargetValue';
+  const headerFields = 'RequestForQuotation,RFQStatus,RFQType,RFQDescription,Language,PurchasingOrganization,PurchasingGroup,CompanyCode,DocumentCurrency,PublishingDate,QuotationDeadline,FollowOnDocumentType,CreatedBy,USerFullName,CreationDate,TargetValue';
   const itemFields = 'RequestForQuotation,RequestForQuotationItem,ScheduleLine,ShortText,Material,MaterialGroup,Plant,RequestedQuantity,OrderQuantityUnit,BaseUnit,DeliveryDate,PurchaseRequisition,PurchaseRequisitionItem,IncotermsClassification,IncotermsLocation1,IncotermsLocation2,Manufacturer,ManufacturerPartNumber';
   const bidderFields = 'RequestForQuotation,Supplier,SupplierName,PartnerFunction,PartnerCounter';
   let remembered = { filterValues: null, query: '', next: '', previous: [], selected: new Map() };
@@ -35,11 +35,35 @@
   function fieldsCard(title,values) { return `<section class="card rfq-card"><h2>${esc(title)}</h2><div class="rfq-meta-grid">${values.map(([label,value])=>`<div><span>${esc(label)}</span><strong>${escValue(value)}</strong></div>`).join('')}</div></section>`; }
   function tableHtml(columns,data,variant='') { return `<div class="rfq-table-wrap"><table class="table rfq-table ${variant}"><thead><tr>${columns.map(col=>`<th>${esc(col.label)}</th>`).join('')}</tr></thead><tbody>${data.length?data.map(row=>`<tr>${columns.map(col=>`<td>${escValue(col.format?col.format(row[col.key]):row[col.key])}</td>`).join('')}</tr>`).join(''):`<tr><td colspan="${columns.length}" class="rfq-empty">No records found.</td></tr>`}</tbody></table></div>`; }
 
+  function addStatusColumn(table) {
+    if (!table) return;
+    const body=table.querySelector('tbody');
+    const observer=new MutationObserver(async()=>{
+      observer.disconnect();
+      const headerRow=table.querySelector('thead tr');
+      const rfqIndex=[...headerRow.children].findIndex(cell=>cell.textContent.trim()==='RFQ');
+      if (rfqIndex<0) { observer.observe(body,{childList:true}); return; }
+      if (![...headerRow.children].some(cell=>cell.textContent.trim()==='Status')) { const statusHeader=document.createElement('th');statusHeader.textContent='Status';headerRow.insertBefore(statusHeader,headerRow.children[rfqIndex+1]||null); }
+      const numbers=[...body.rows].map(row=>row.cells[rfqIndex]?.textContent.trim()).filter(Boolean);
+      const rowsMissingStatus=[...body.rows].filter(row=>row.cells.length<headerRow.children.length);
+      if (numbers.length&&rowsMissingStatus.length) {
+        try {
+          const filter=numbers.map(number=>`RequestForQuotation eq '${quote(number)}'`).join(' or ');
+          const result=rows(table.classList.contains('rfq-selectable-table')?await Portal.rfqOdata('RFQ_Header',{query:`?$filter=${encodeURIComponent(filter)}&$select=RequestForQuotation,RFQStatus&$top=100`}):await Portal.rfqSupplierList({query:'?$top=100'}));
+          const statuses=new Map(result.map(row=>[String(row.RequestForQuotation),row.RFQStatus]));
+          rowsMissingStatus.forEach(row=>{const cell=document.createElement('td');cell.textContent=escValue(statuses.get(row.cells[rfqIndex]?.textContent.trim()));row.insertBefore(cell,row.cells[rfqIndex+1]||null)});
+        } catch {}
+      }
+      observer.observe(body,{childList:true});
+    });
+    observer.observe(body,{childList:true});
+  }
+
   function renderSupplierList(content,back,page=1,detailNumber='') {
     Portal.$('#page-title').textContent='My RFQs';Portal.$('#page-subtitle').textContent='Requests for Quotation assigned to your supplier account';Portal.$('#view-label').textContent='SUPPLIER RFQ DETAILS';
     if(detailNumber){renderDetail(content,{RequestForQuotation:detailNumber},()=>{Portal.setRoute('rfq','RFQ Inbox');renderSupplierList(content,back,page)});return}
     content.innerHTML=`<div class="rfq-toolbar"><button type="button" class="button-secondary" data-supplier-rfq-back>‹ &nbsp;Return to RFQs & Quotes</button><button type="button" class="button-secondary" data-supplier-rfq-refresh>Refresh</button></div><section class="card rfq-card rfq-list-card"><div class="rfq-list-heading"><div><h2>RFQs assigned to your supplier account</h2><p>Select the arrow on a row to review its complete RFQ information.</p></div></div><div class="rfq-message" role="status" aria-live="polite">Loading your RFQs…</div><div class="rfq-table-wrap"><table class="table rfq-table rfq-list-table"><thead><tr><th>RFQ</th><th>Type</th><th>Description</th><th>Purchasing Organization</th><th>Purchasing Group</th><th>Company Code</th><th>Currency</th><th>Target Value</th><th>Quotation Deadline</th><th>Created By</th><th>Created On</th><th></th></tr></thead><tbody data-supplier-rfq-rows></tbody></table></div><div class="rfq-pagination"><span data-supplier-rfq-count></span><div><button type="button" class="button-secondary" data-supplier-rfq-prev>Previous</button><span data-supplier-rfq-page>Page ${page}</span><button type="button" class="button-secondary" data-supplier-rfq-next>Next</button></div></div></section>`;
-    content.querySelector('[data-supplier-rfq-back]').addEventListener('click',back);
+    addStatusColumn(content.querySelector('.rfq-list-table'));content.querySelector('[data-supplier-rfq-back]').addEventListener('click',back);
     content.querySelector('[data-supplier-rfq-refresh]').addEventListener('click',()=>renderSupplierList(content,back,page));
     content.querySelector('[data-supplier-rfq-prev]').addEventListener('click',()=>{if(page>1)renderSupplierList(content,back,page-1)});
     content.querySelector('[data-supplier-rfq-next]').addEventListener('click',()=>renderSupplierList(content,back,page+1));
@@ -63,7 +87,7 @@
       <form id="rfq-filter-form" class="rfq-filters" data-rfq-filters><label>RFQ Number<input class="form-control" name="rfqNumber" maxlength="10" placeholder="Exact RFQ number"></label><label>RFQ Type<input class="form-control" name="rfqType" maxlength="4"></label><label>Description<input class="form-control" name="description" maxlength="40"></label><label>Purchasing Org.<input class="form-control" name="purchasingOrg" maxlength="4"></label><label>Purchasing Group<input class="form-control" name="purchasingGroup" maxlength="3"></label><label>Company Code<input class="form-control" name="companyCode" maxlength="4"></label><label>Deadline from<input class="form-control" type="date" name="deadlineFrom"></label><label>Deadline to<input class="form-control" type="date" name="deadlineTo"></label></form>
       <div class="rfq-message" role="status" aria-live="polite">Loading RFQs…</div><div class="rfq-table-wrap"><table class="table rfq-table rfq-list-table rfq-selectable-table"><thead><tr><th><input type="checkbox" aria-label="Select all RFQs on this page" data-rfq-select-page></th><th>RFQ</th><th>Type</th><th>Description</th><th>Purchasing Organization</th><th>Purchasing Group</th><th>Company Code</th><th>Currency</th><th>Target Value</th><th>Quotation Deadline</th><th>Created By</th><th>Created On</th><th></th></tr></thead><tbody data-rfq-rows></tbody></table></div>
       <div class="rfq-pagination"><span data-rfq-count></span><div><button type="button" class="button-secondary" data-rfq-prev disabled>Previous</button><span data-rfq-page>Page 1</span><button type="button" class="button-secondary" data-rfq-next disabled>Next</button></div></div></section>`;
-    content.querySelector('[data-rfq-back]').addEventListener('click',back);
+    addStatusColumn(content.querySelector('.rfq-selectable-table'));content.querySelector('[data-rfq-back]').addEventListener('click',back);
     const form=content.querySelector('[data-rfq-filters]');if(remembered.filterValues)Object.entries(remembered.filterValues).forEach(([key,val])=>{const input=form.elements.namedItem(key);if(input)input.value=val});
     const updateSend=()=>{content.querySelector('[data-rfq-send]').disabled=!remembered.selected.size};
     const renderRows=(items)=>{const tbody=content.querySelector('[data-rfq-rows]');tbody.innerHTML=items.length?items.map(row=>{const id=String(row.RequestForQuotation||'');const checked=remembered.selected.has(id);return `<tr><td><input type="checkbox" aria-label="Select RFQ ${esc(id)}" data-rfq-check="${esc(id)}" ${checked?'checked':''}></td><td><strong>${escValue(id)}</strong></td><td>${escValue(row.RFQType)}</td><td>${escValue(row.RFQDescription)}</td><td>${escValue(row.PurchasingOrganization)}</td><td>${escValue(row.PurchasingGroup)}</td><td>${escValue(row.CompanyCode)}</td><td>${escValue(row.DocumentCurrency)}</td><td>${escValue(row.TargetValue)}</td><td>${escValue(dateValue(row.QuotationDeadline))}</td><td>${escValue(row.USerFullName||row.CreatedBy)}</td><td>${escValue(dateValue(row.CreationDate))}</td><td><button type="button" class="rfq-open" data-rfq-open="${esc(id)}" aria-label="Open RFQ ${esc(id)}">›</button></td></tr>`}).join(''):`<tr><td colspan="13" class="rfq-empty">No RFQs match these filters.</td></tr>`;
