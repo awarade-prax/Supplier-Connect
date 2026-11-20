@@ -49,7 +49,7 @@ test('OData forwarding, email workflows, and quotation draft/submission', { time
       assert.match(details.EmailDate, /^\/Date\(\d+\)\/$/);
       assert.match(details.EmailTime, /^PT\d{2}H\d{2}M\d{2}S$/);
       if (!emailDetails) assert.equal(details.EmailSend, 'Yes');
-      emailDetails = { ...emailDetails, ...details, SAP_UUID: invitationUuid };
+      emailDetails = { ...emailDetails, ...details, SAP_UUID: invitationUuid, SAP_PARENT_UUID: invitationUuid };
       res.statusCode = req.method === 'POST' ? 201 : 204;
       return res.end(req.method === 'POST' ? JSON.stringify({ d: emailDetails }) : undefined);
     }
@@ -60,8 +60,10 @@ test('OData forwarding, email workflows, and quotation draft/submission', { time
     }
     if (requestUrl.pathname === '/sap/YY1_RFQ_PORTAL' || /^\/sap\/YY1_RFQ_PORTAL\(guid'[^']+'\)$/.test(requestUrl.pathname)) {
       if (req.method === 'GET') {
-        const found = requestUrl.searchParams.get('$filter')?.includes('7000000002') ? quotationHeader : invitationHeader;
-        return res.end(JSON.stringify({ d: { results: found ? [found] : [] } }));
+        const requestedNumbers = [...(requestUrl.searchParams.get('$filter') || '').matchAll(/RFQNumber eq '((?:[^']|'')+)'/g)]
+          .map(match => match[1].replace(/''/g, "'"));
+        const found = [invitationHeader, quotationHeader].filter(header => header && requestedNumbers.includes(header.RFQNumber));
+        return res.end(JSON.stringify({ d: { results: found } }));
       }
       const chunks = [];
       for await (const chunk of req) chunks.push(chunk);
@@ -216,6 +218,11 @@ test('OData forwarding, email workflows, and quotation draft/submission', { time
   const emailStatus = await fetch(`${base}/api/rfq/email-status`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rfqNumbers: ['7000000001'] }) });
   assert.equal(emailStatus.status, 200);
   assert.deepEqual((await emailStatus.json()).existingRfqs, ['7000000001']);
+  const emailDetailsResponse = await fetch(`${base}/api/rfq/email-details`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rfqNumbers: ['7000000001', '9999999999'] }) });
+  assert.equal(emailDetailsResponse.status, 200);
+  const emailStatuses = (await emailDetailsResponse.json()).statuses;
+  assert.deepEqual(emailStatuses['7000000001'], { emailSend: 'Yes', emailDate: emailDetails.EmailDate, emailTime: emailDetails.EmailTime });
+  assert.deepEqual(emailStatuses['9999999999'], { emailSend: 'No', emailDate: '', emailTime: '' });
   const missing = await mail('send-rfq-invitation', { rfqNumber: '7000000001', supplierNumber: 'missing' });
   assert.equal(missing.status, 409);
   assert.match((await missing.json()).error, /not listed as a bidder/);
