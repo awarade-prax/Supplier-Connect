@@ -172,6 +172,71 @@ async function findExistingRfqNumbers(rfqNumbers) {
   return existing;
 }
 
+function rfqEmailSentAt(details) {
+  const dateMatch = typeof details.EmailDate === 'string' && details.EmailDate.match(/^\/Date\((-?\d+)/);
+  const date = dateMatch ? Number(dateMatch[1]) : Date.parse(details.EmailDate);
+  const timeMatch = String(details.EmailTime || '').match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/);
+  const timeSeconds = timeMatch
+    ? Number(timeMatch[1] || 0) * 3600 + Number(timeMatch[2] || 0) * 60 + Number(timeMatch[3] || 0)
+    : 0;
+  return Number.isNaN(date) ? 0 : date + timeSeconds * 1000;
+}
+
+async function findRfqEmailDetails(rfqNumbers) {
+  const statuses = Object.fromEntries(rfqNumbers.map(rfqNumber => [
+    rfqNumber,
+    { emailSend: 'No', emailDate: '', emailTime: '' }
+  ]));
+  const quote = value => String(value).replace(/'/g, "''");
+  const rfqFilter = rfqNumbers.map(rfqNumber => `RFQNumber eq '${quote(rfqNumber)}'`).join(' or ');
+  const parents = await readSapCollection(
+    RFQ_PORTAL_SERVICE_ROOT,
+    'YY1_RFQ_PORTAL',
+    `?$filter=${encodeURIComponent(rfqFilter)}&$select=SAP_UUID,RFQNumber&$top=5000`
+  );
+  const parentGroups = new Map();
+  for (const parent of parents) {
+    const rfqNumber = String(parent.RFQNumber || '').trim();
+    const parentUuid = String(parent.SAP_UUID || '');
+    if (!statuses[rfqNumber] || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(parentUuid)) continue;
+    if (!parentGroups.has(rfqNumber)) parentGroups.set(rfqNumber, []);
+    parentGroups.get(rfqNumber).push(parentUuid);
+  }
+
+  const parentUuids = [...parentGroups.values()].flat();
+  const emailDetails = [];
+  for (let offset = 0; offset < parentUuids.length; offset += 50) {
+    const parentFilter = parentUuids.slice(offset, offset + 50)
+      .map(parentUuid => `SAP_PARENT_UUID eq guid'${parentUuid}'`)
+      .join(' or ');
+    emailDetails.push(...await readSapCollection(
+      RFQ_PORTAL_SERVICE_ROOT,
+      'YY1_EMAILDETAILS_RFQ_PORTAL',
+      `?$filter=${encodeURIComponent(parentFilter)}&$select=SAP_PARENT_UUID,EmailSend,EmailDate,EmailTime&$top=1000`
+    ));
+  }
+
+  const uuidToRfq = new Map();
+  for (const [rfqNumber, uuids] of parentGroups) {
+    for (const uuid of uuids) uuidToRfq.set(uuid.toLowerCase(), rfqNumber);
+  }
+  const latestSentAt = new Map();
+  for (const details of emailDetails) {
+    if (String(details.EmailSend || '').trim().toLowerCase() !== 'yes') continue;
+    const rfqNumber = uuidToRfq.get(String(details.SAP_PARENT_UUID || '').toLowerCase());
+    if (!rfqNumber) continue;
+    const sentAt = rfqEmailSentAt(details);
+    if (latestSentAt.has(rfqNumber) && latestSentAt.get(rfqNumber) > sentAt) continue;
+    latestSentAt.set(rfqNumber, sentAt);
+    statuses[rfqNumber] = {
+      emailSend: 'Yes',
+      emailDate: details.EmailDate || '',
+      emailTime: details.EmailTime || ''
+    };
+  }
+  return statuses;
+}
+
 async function saveRfqInvitationItems(parentUuid, sourceItems, csrf) {
   const parentFilter = `SAP_PARENT_UUID eq guid'${parentUuid.toLowerCase()}'`;
   const existingItems = await readSapCollection(
@@ -942,6 +1007,28 @@ const server = http.createServer(async (req, res) => {
     } catch (error) {
       console.error('RFQ invitation status lookup failed:', error.message);
       return send(res, 502, JSON.stringify({ error: 'Existing RFQ CBO records could not be checked.' }));
+    }
+  }
+
+  if (url.pathname === '/api/rfq/email-details') {
+    if (req.method !== 'POST') return send(res, 405, JSON.stringify({ error: 'POST is required.' }));
+    let payload;
+    try {
+      payload = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+    } catch {
+      return send(res, 400, JSON.stringify({ error: 'Request must contain valid JSON.' }));
+    }
+    if (!Array.isArray(payload.rfqNumbers)) return send(res, 400, JSON.stringify({ error: 'RFQ numbers must be provided as an array.' }));
+    const rfqNumbers = [...new Set(payload.rfqNumbers.map(value => cleanHeader(value)))];
+    if (!rfqNumbers.length || rfqNumbers.length > 50 || rfqNumbers.some(value => !value || value.length > 10))
+      return send(res, 400, JSON.stringify({ error: 'Provide between 1 and 50 valid RFQ numbers.' }));
+    if (!SAP_USERNAME || !SAP_PASSWORD) return send(res, 503, JSON.stringify({ error: 'SAP credentials are not configured on the server.' }));
+    try {
+      const statuses = await findRfqEmailDetails(rfqNumbers);
+      return send(res, 200, JSON.stringify({ statuses }));
+    } catch (error) {
+      console.error('RFQ CBO email details lookup failed:', error.message);
+      return send(res, 502, JSON.stringify({ error: 'RFQ CBO email details could not be loaded.' }));
     }
   }
 
