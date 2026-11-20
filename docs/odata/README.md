@@ -59,3 +59,9 @@ The service root defaults to the same host as `SAP_ODATA_SERVICE_ROOT`. Set `SAP
 - Header dates and item `DeliveryDate` use the OData V2 JSON `/Date(milliseconds)/` representation or JSON null for blank dates. Decimal values use strings.
 - Items are created under `YY1_RFQ_PORTAL(guid'...')/to_ItemNode`. Repeated saves update existing RFQ item numbers via PATCH on `YY1_ITEMNODE_RFQ_PORTAL`, preserving ETags.
 - Header and item writes are separate requests. If an item write fails after the header succeeds, the response reports failure; retrying finds the existing header by its semantic key and updates items already saved.
+
+## Open purchase orders (OData V4)
+
+`Z_OPENPO_SUPP_PORTAL.xml` defines `OpenPOHeader` (20 fields), `OpenPOItem` (66 fields), `OpenPOItemHistorySum` (8 fields), and `OpenPOItemScheduleSum` (7 fields). The report uses all 101 scalar fields. Header fields appear in the overview; item fields appear in grouped expandable details; all history and schedule summary fields appear in labeled detail sections. The report reads all four published collections filtered by `PurchaseOrder`.
+
+Configure `SAP_OPEN_PO_ODATA_SERVICE_ROOT` if the service differs from `/sap/opu/odata4/sap/z_openpo_supp_portal_sb/srvd_a2x/sap/z_openpo_supp_portal_sd/0001` on the configured SAP tenant. The integration is GET-only and uses V4 `Edm.Date`, `value`, `@odata.count`, and `@odata.nextLink`. Continuation links are validated and rewritten through the same proxy. Field coverage is checked against the supplied XML by `npm test`.

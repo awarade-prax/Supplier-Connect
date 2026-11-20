@@ -7,6 +7,23 @@ const { spawn } = require('node:child_process');
 const { once } = require('node:events');
 const path = require('node:path');
 const fs = require('node:fs');
+const vm = require('node:vm');
+
+test('Open PO display schema covers every scalar field of all four service entities', () => {
+  const metadata = fs.readFileSync(path.join(__dirname, '..', 'docs', 'odata', 'Z_OPENPO_SUPP_PORTAL.xml'), 'utf8');
+  const window = {};
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'js', 'modules', 'open-po-schema.js'), 'utf8'), { window });
+  let count = 0;
+  for (const match of metadata.matchAll(/<EntitySet\b[^>]*Name="([^"]+)"[^>]*EntityType="([^"]+)"/g)) {
+    const name = match[1], type = match[2].split('.').pop();
+    const entity = metadata.match(new RegExp(`<EntityType Name="${type}"[\\s\\S]*?</EntityType>`))[0];
+    const fields = [...entity.matchAll(/<Property\b[^>]*Name="([^"]+)"/g)].map(value => value[1]);
+    assert.deepEqual(Array.from(window.OPEN_PO_SCHEMA[name], field => field.name), fields);
+    count += fields.length;
+  }
+  assert.equal(count, 101);
+  assert.equal(Object.keys(window.OPEN_PO_SCHEMA).length, 4);
+});
 
 test('OData forwarding, email workflows, and quotation draft/submission', { timeout: 15000 }, async t => {
   const uuid = '11111111-1111-1111-1111-111111111111';
@@ -35,6 +52,12 @@ test('OData forwarding, email workflows, and quotation draft/submission', { time
       return res.end(JSON.stringify({ d: { results: [] } }));
     }
     const requestUrl = new URL(req.url, 'http://localhost');
+    if (requestUrl.pathname.startsWith('/sap/OpenPO')) {
+      const entity = requestUrl.pathname.split('/').pop();
+      const payload = { value: [{ PurchaseOrder: '4500000001', PurchaseOrderItem: '00010' }], '@odata.count': 2 };
+      if (!requestUrl.searchParams.has('$skip')) payload['@odata.nextLink'] = `${root}/${entity}?$skip=1&$top=1`;
+      return res.end(JSON.stringify(payload));
+    }
     if (requestUrl.pathname === '/sap/YY1_EMAILDETAILS_RFQ_PORTAL' && req.method === 'GET') {
       return res.end(JSON.stringify({ d: { results: emailDetails ? [emailDetails] : [] } }));
     }
@@ -149,6 +172,7 @@ test('OData forwarding, email workflows, and quotation draft/submission', { time
     env: { ...process.env, PORT: '0', SAP_USERNAME: 'test-user', SAP_PASSWORD: 'test-password',
       SMTP_HOST: 'smtp.test.local', SMTP_PORT: '587', SMTP_USER: 'test-user', SMTP_PASSWORD: 'test-password',
       SAP_ODATA_SERVICE_ROOT: root, SAP_RFQ_ODATA_SERVICE_ROOT: root,
+      SAP_OPEN_PO_ODATA_SERVICE_ROOT: root,
       SAP_RFQ_PORTAL_ODATA_SERVICE_ROOT: root, SAP_BP_ODATA_SERVICE_ROOT: root },
     stdio: ['ignore', 'pipe', 'pipe']
   });
@@ -247,4 +271,28 @@ test('OData forwarding, email workflows, and quotation draft/submission', { time
   assert.equal(invalid.status, 400);
   await invalid.arrayBuffer();
   assert.equal(quotationSaves, 2, 'invalid dates must fail before writing the header');
+
+  for (const entity of ['OpenPOHeader', 'OpenPOItem', 'OpenPOItemHistorySum', 'OpenPOItemScheduleSum']) {
+    const report = await fetch(`${base}/api/open-po/${entity}?$top=1`);
+    assert.equal(report.status, 200);
+    const page = await report.json();
+    assert.equal(page.value[0].PurchaseOrder, '4500000001');
+    assert.equal(page['@odata.nextLink'], `/api/open-po/${entity}?$skip=1&$top=1`);
+    const continued = await fetch(base + page['@odata.nextLink']);
+    assert.equal(continued.status, 200);
+    await continued.arrayBuffer();
+  }
+  for (const [suffix, options, expected] of [
+    ['OpenPOHeader', { headers: { 'X-Supplier-Access-Token': token } }, 403],
+    ['OpenPOHeader', { headers: { Referer: `${base}/?token=${token}` } }, 403],
+    ['OpenPOHeader?token=', {}, 403],
+    ['OpenPOHeader', { method: 'POST' }, 405],
+    ['OpenPOHeader?$top=101', {}, 400],
+    ['OpenPOHeader?$expand=*', {}, 400],
+    ['UnapprovedEntity', {}, 404]
+  ]) {
+    const denied = await fetch(`${base}/api/open-po/${suffix}`, options);
+    assert.equal(denied.status, expected);
+    await denied.arrayBuffer();
+  }
 });
