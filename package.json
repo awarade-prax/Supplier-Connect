@@ -4,7 +4,10 @@
   "private": true,
   "description": "SAP S/4HANA supplier portal and OData proxy",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "check:sap": "node scripts/check-sap.js",
+    "check:mail": "node scripts/check-mail.js",
+    "test": "node --test test/odata-proxy.test.js"
   },
   "dependencies": {
     "dotenv": "^18.0.10",

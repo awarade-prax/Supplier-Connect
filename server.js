@@ -4,6 +4,8 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
+const { getSmtpConfig, sendMail, mailError } = require('./lib/mail');
+const { prepareQuotation } = require('./lib/quotation');
 
 const cliPort = process.argv[2] && /^\d+$/.test(process.argv[2]) ? Number(process.argv[2]) : undefined;
 const PORT = Number(process.env.PORT || cliPort || 3000);
@@ -55,25 +57,6 @@ function getAllowedODataPath(pathname) {
   return null;
 }
 
-function getSmtpConfig() {
-  const fromEnv = {
-    SMTP_HOST: process.env.SMTP_HOST,
-    SMTP_PORT: process.env.SMTP_PORT,
-    SMTP_USER: process.env.SMTP_USER,
-    SMTP_PASSWORD: process.env.SMTP_PASSWORD,
-    SMTP_SENDER_NAME: process.env.SMTP_SENDER_NAME
-  };
-  try {
-    const vcap = JSON.parse(process.env.VCAP_SERVICES || '{}');
-    const bindings = Object.values(vcap).flat();
-    const binding = bindings.find(service => service.name === 'supplierportal-smtp-credentials')
-      || bindings.find(service => service.tags?.includes('supplierportal-smtp-credentials'));
-    return { ...(binding?.credentials || {}), ...Object.fromEntries(Object.entries(fromEnv).filter(([, value]) => value)) };
-  } catch {
-    return fromEnv;
-  }
-}
-
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 }
@@ -87,11 +70,20 @@ async function readBody(req) {
 }
 
 async function getCsrf(entity, serviceRoot = SERVICE_ROOT) {
-  const response = await fetch(`${serviceRoot}/${encodeURIComponent(entity)}`, { headers: { Authorization: `Basic ${Buffer.from(`${SAP_USERNAME}:${SAP_PASSWORD}`).toString('base64')}`, 'X-CSRF-Token': 'Fetch', Accept: 'application/json' } });
+  const response = await fetch(`${serviceRoot}/${encodeURIComponent(entity)}?$top=1`, { headers: { Authorization: `Basic ${Buffer.from(`${SAP_USERNAME}:${SAP_PASSWORD}`).toString('base64')}`, 'X-CSRF-Token': 'Fetch', Accept: 'application/json' } });
   const token = response.headers.get('x-csrf-token');
-  if (!response.ok || !token) throw new Error('SAP did not provide a CSRF token.');
+  await sapJson(response, 'SAP CSRF token request');
+  if (!token) throw new Error('SAP did not provide a CSRF token. Check write access for this service.');
   const cookies = (response.headers.getSetCookie ? response.headers.getSetCookie() : [response.headers.get('set-cookie')].filter(Boolean)).map(value => value.split(';')[0]).join('; ');
   return { token, cookies };
+}
+
+function sapConnectionError(error) {
+  const code = error.cause?.code || error.code;
+  if (code === 'ENOTFOUND') return 'SAP hostname could not be resolved. Check the SAP service URLs in .env; replace your-sap-host with the actual SAP tenant hostname.';
+  if (['CERT_HAS_EXPIRED', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY'].includes(code)) return 'SAP TLS certificate verification failed. Configure the trusted corporate CA with NODE_EXTRA_CA_CERTS if your office network inspects HTTPS.';
+  if (['ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT', 'ECONNREFUSED', 'ECONNRESET'].includes(code)) return 'Could not connect to SAP. Check office network, VPN, firewall, and proxy access to the SAP tenant.';
+  return error.message === 'fetch failed' ? 'Could not connect to SAP. Run npm run check:sap for connection diagnostics.' : error.message;
 }
 
 async function sapJson(response, operation) {
@@ -142,52 +134,52 @@ async function saveSupplierQuotation(req, res, cors) {
   const token = String(req.headers['x-supplier-access-token'] || '');
   if (!token) return send(res, 401, JSON.stringify({ error: 'A supplier invitation token is required.' }), undefined, cors);
   if (!SAP_USERNAME || !SAP_PASSWORD) return send(res, 503, JSON.stringify({ error: 'SAP credentials are missing.' }), undefined, cors);
+  let body;
   try {
-    const { supplierNumber } = await resolveRfqSupplierByAccessToken(token);
-    const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+    body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error();
+  } catch { return send(res, 400, JSON.stringify({ error: 'Quotation must contain a valid JSON object.' }), undefined, cors); }
+  try {
+    const { supplierNumber, parent } = await resolveRfqSupplierByAccessToken(token);
     const rfqNumber = String(body.RFQNumber || '').trim();
     if (!rfqNumber || rfqNumber.length > 10) return send(res, 400, JSON.stringify({ error: 'Select a valid RFQ number.' }), undefined, cors);
     const bidderFilter = `RequestForQuotation eq '${rfqNumber.replace(/'/g, "''")}' and Supplier eq '${supplierNumber.replace(/'/g, "''")}'`;
     if (!(await readSapCollection(RFQ_SERVICE_ROOT, 'RFQ_Bidder', `?$filter=${encodeURIComponent(bidderFilter)}&$top=1`)).length)
       return send(res, 403, JSON.stringify({ error: 'This RFQ is not assigned to your supplier account.' }), undefined, cors);
     const rfqHeaders = await readSapCollection(RFQ_SERVICE_ROOT, 'RFQ_Header', `?$filter=${encodeURIComponent(`RequestForQuotation eq '${rfqNumber.replace(/'/g, "''")}'`)}&$top=1`);
-    const rfqHeader = rfqHeaders[0] || {};
-    const status = body.Status === '03' ? '03' : '02';
-    const allowedHeader = ['PaymentTerms','SupplyLocation','QuotationValidTill','RFQdueDate','Currency','FreightIncoterms','HeaderRemarks','SAP_Description'];
-    const header = { RFQNumber: rfqNumber, Supplier: supplierNumber, Status: status };
-    for (const field of allowedHeader) if (body[field] !== undefined && body[field] !== '') header[field] = body[field];
-    header.Currency = String(rfqHeader.DocumentCurrency || header.Currency || '').slice(0, 5);
-    const dueDateValue = rfqHeader.QuotationDeadline;
-    if (dueDateValue) {
-      const dueMatch = String(dueDateValue).match(/^\/Date\((-?\d+)/);
-      const dueDate = dueMatch ? new Date(Number(dueMatch[1])) : new Date(dueDateValue);
-      if (!Number.isNaN(dueDate.getTime())) header.RFQdueDate = dueDate.toISOString().slice(0, 10);
-    }
-    const items = Array.isArray(body.Items) ? body.Items.slice(0, 500).map(item => {
-      const result = {};
-      for (const field of ['RFQItem','MaterialDescription','QuotedQuantity','RequestedQuantity','Price','DeliveryDate','SpecialConditions']) if (item[field] !== undefined && item[field] !== '') result[field] = item[field];
-      return result;
-    }) : [];
+    if (!rfqHeaders.length) return send(res, 404, JSON.stringify({ error: 'The selected RFQ no longer exists in SAP.' }), undefined, cors);
+    const { header, items, status } = prepareQuotation({ ...body, RFQNumber: rfqNumber }, { supplierNumber, parent, rfqHeader: rfqHeaders[0] });
+    const quotationFilter = `RFQNumber eq '${rfqNumber.replace(/'/g, "''")}' and Supplier eq '${supplierNumber.replace(/'/g, "''")}'`;
+    const matches = await readSapCollection(RFQ_PORTAL_SERVICE_ROOT, 'YY1_RFQ_PORTAL', `?$filter=${encodeURIComponent(quotationFilter)}&$top=2`);
+    if (matches.length > 1) throw new Error('SAP returned multiple quotations for this supplier and RFQ. Resolve the duplicate records before saving.');
+    const previousHeader = matches[0];
+    if (previousHeader && !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(previousHeader.SAP_UUID || '')) throw new Error('SAP returned a quotation without a valid UUID.');
     const csrf = await getCsrf('YY1_RFQ_PORTAL', RFQ_PORTAL_SERVICE_ROOT);
-    const params = new URLSearchParams();
-    for (const [key, value] of Object.entries(header)) {
-      const literal = key === 'QuotationValidTill' || key === 'RFQdueDate'
-        ? `datetime'${String(value).slice(0, 10)}T00:00:00'`
-        : `'${String(value).replace(/'/g, "''")}'`;
-      params.set(key, literal);
-    }
-    const upstream = await fetch(`${RFQ_PORTAL_SERVICE_ROOT}/YY1_RFQ_PORTALSap_upsert?${params}`, { method: 'POST', headers: { ...sapAuthHeaders(), 'X-CSRF-Token': csrf.token, ...(csrf.cookies ? { Cookie: csrf.cookies } : {}), 'Content-Type': 'application/json' }, body: '{}' });
-    const saved = await sapJson(upstream, 'Save quotation header');
+    const headerPath = previousHeader ? `YY1_RFQ_PORTAL(guid'${previousHeader.SAP_UUID}')` : 'YY1_RFQ_PORTAL';
+    const upstream = await fetch(`${RFQ_PORTAL_SERVICE_ROOT}/${headerPath}`, {
+      method: previousHeader ? 'PATCH' : 'POST',
+      headers: { ...sapAuthHeaders(), 'X-CSRF-Token': csrf.token, ...(csrf.cookies ? { Cookie: csrf.cookies } : {}), 'Content-Type': 'application/json', ...(previousHeader ? { 'If-Match': previousHeader.__metadata?.etag || '*' } : {}) },
+      body: JSON.stringify(header), redirect: 'manual'
+    });
+    const writtenHeader = await sapJson(upstream, 'Save quotation header');
+    const saved = previousHeader ? { ...previousHeader, ...header, ...writtenHeader } : writtenHeader;
     const uuid = String(saved?.SAP_UUID || '');
-    if (items.length && !uuid) throw new Error('SAP saved the quotation header but did not return its UUID, so quotation items were not saved.');
+    if (items.length && !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(uuid)) throw new Error('SAP saved the quotation header but did not return a valid UUID, so quotation items were not saved.');
     if (items.length) {
+      const itemPath = `${RFQ_PORTAL_SERVICE_ROOT}/YY1_RFQ_PORTAL(guid'${uuid}')/to_ItemNode`;
+      const existingResponse = await fetch(`${itemPath}?$top=500`, { headers: sapAuthHeaders() });
+      const existingData = await sapJson(existingResponse, 'Load saved quotation items');
+      const existing = Array.isArray(existingData?.results) ? existingData.results : [];
       for (const item of items) {
-        const response = await fetch(`${RFQ_PORTAL_SERVICE_ROOT}/YY1_RFQ_PORTAL(guid'${uuid}')/to_ItemNode`, { method: 'POST', headers: { ...sapAuthHeaders(), 'X-CSRF-Token': csrf.token, ...(csrf.cookies ? { Cookie: csrf.cookies } : {}), 'Content-Type': 'application/json' }, body: JSON.stringify(item) });
+        const previous = existing.find(row => String(row.RFQItem) === item.RFQItem);
+        const target = previous ? `${RFQ_PORTAL_SERVICE_ROOT}/YY1_ITEMNODE_RFQ_PORTAL(guid'${previous.SAP_UUID}')` : itemPath;
+        const response = await fetch(target, { method: previous ? 'PATCH' : 'POST', headers: { ...sapAuthHeaders(), 'X-CSRF-Token': csrf.token, ...(csrf.cookies ? { Cookie: csrf.cookies } : {}), 'Content-Type': 'application/json', ...(previous ? { 'If-Match': previous.__metadata?.etag || '*' } : {}) }, body: JSON.stringify(item) });
         await sapJson(response, 'Save quotation item');
       }
     }
     return send(res, 200, JSON.stringify({ success: true, status, record: saved }), undefined, cors);
   } catch (error) {
+    console.error('Supplier quotation save failed:', error.message);
     return send(res, error.statusCode || 502, JSON.stringify({ error: error.statusCode ? error.message : error.message || 'Quotation could not be saved.' }), undefined, cors);
   }
 }
@@ -228,14 +220,15 @@ async function resolveRfqSupplier(rfqNumber, supplierNumber) {
   const bidderFilter = `RequestForQuotation eq '${quote(rfqNumber)}' and Supplier eq '${quote(supplierNumber)}'`;
   const bidders = await readSapCollection(RFQ_SERVICE_ROOT, 'RFQ_Bidder', `?$filter=${encodeURIComponent(bidderFilter)}&$top=1`);
   if (!bidders.length) throw Object.assign(new Error('This supplier is not listed as a bidder for the selected RFQ.'), { statusCode: 409 });
-  const creationFilter = `SupplierNumber eq '${quote(supplierNumber)}'`;
-  const creations = await readSapCollection(SERVICE_ROOT, 'YY1_SAPCREATION_SUPPLIER_ONBOA', `?$filter=${encodeURIComponent(creationFilter)}&$top=5`);
-  const creation = creations.find(record => String(record.SupplierNumber || '').trim() === supplierNumber);
-  if (!creation?.SAP_PARENT_UUID || !creation?.SupplierID) throw Object.assign(new Error('No matching supplier onboarding record was found.'), { statusCode: 409 });
-  const onboardingFilter = `SAP_UUID eq guid'${String(creation.SAP_PARENT_UUID).toLowerCase()}' and ID eq '${quote(creation.SupplierID)}'`;
+  const creationFilter = `SupplierNumber eq '${quote(supplierNumber)}' or BPNumber eq '${quote(supplierNumber)}'`;
+  const creations = await readSapCollection(SERVICE_ROOT, 'YY1_SAPCREATION_SUPPLIER_ONBOA', `?$filter=${encodeURIComponent(creationFilter)}&$top=50`);
+  const creation = creations.find(record => record.SAP_PARENT_UUID && String(record.SupplierNumber || '').trim() === supplierNumber)
+    || creations.find(record => record.SAP_PARENT_UUID && !String(record.SupplierNumber || '').trim() && String(record.BPNumber || '').trim() === supplierNumber);
+  if (!creation?.SAP_PARENT_UUID) throw Object.assign(new Error(`Supplier ${supplierNumber} has no linked portal onboarding record. Complete Supplier Registration and link its SAP supplier number before sending an RFQ invitation.`), { statusCode: 409 });
+  const onboardingFilter = `SAP_UUID eq guid'${String(creation.SAP_PARENT_UUID).toLowerCase()}'`;
   const onboardings = await readSapCollection(SERVICE_ROOT, 'YY1_SUPPLIER_ONBOARDING', `?$filter=${encodeURIComponent(onboardingFilter)}&$top=1`);
-  const onboarding = onboardings.find(record => String(record.SAP_UUID || '').toLowerCase() === String(creation.SAP_PARENT_UUID).toLowerCase() && String(record.ID || '') === String(creation.SupplierID));
-  if (!onboarding?.SupplierEmail || !onboarding?.AccessToken) throw Object.assign(new Error('The supplier email or portal access token is missing from the onboarding record.'), { statusCode: 409 });
+  const onboarding = onboardings.find(record => String(record.SAP_UUID || '').toLowerCase() === String(creation.SAP_PARENT_UUID).toLowerCase());
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(onboarding?.SupplierEmail || '').trim()) || !/^[a-f0-9]{64}$/i.test(onboarding?.AccessToken || '')) throw Object.assign(new Error(`Supplier ${supplierNumber} needs a valid email address and portal access token in Supplier Registration before an RFQ invitation can be sent.`), { statusCode: 409 });
   return { email: String(onboarding.SupplierEmail).trim(), token: String(onboarding.AccessToken).trim(), name: String(onboarding.SupplierName || bidders[0].SupplierName || 'Supplier').trim() };
 }
 
@@ -667,8 +660,8 @@ const server = http.createServer(async (req, res) => {
       const body = Buffer.from(await upstream.arrayBuffer());
       return send(res, upstream.status, body, upstream.headers.get('content-type') || 'application/json; charset=utf-8', { ...cors, ...(upstream.headers.get('etag') ? { ETag: upstream.headers.get('etag') } : {}) });
     } catch (error) {
-      console.error('RFQ OData proxy request failed:', error.message);
-      return send(res, 502, JSON.stringify({ error: 'Could not load RFQ data from SAP. Check the RFQ service configuration and SAP connectivity.' }), undefined, cors);
+      console.error('RFQ OData proxy request failed:', sapConnectionError(error));
+      return send(res, 502, JSON.stringify({ error: sapConnectionError(error) }), undefined, cors);
     }
   }
 
@@ -726,8 +719,8 @@ const server = http.createServer(async (req, res) => {
       for (const name of ['content-type', 'etag', 'location']) { const value = upstream.headers.get(name); if (value) passHeaders[name] = value; }
       return send(res, upstream.status, responseBody, upstream.headers.get('content-type') || 'application/json; charset=utf-8', passHeaders);
     } catch (error) {
-      console.error('OData proxy request failed:', error.message);
-      return send(res, 502, JSON.stringify({ error: 'Could not complete the SAP OData request. Check SAP connectivity, authentication, and entity configuration.' }), undefined, cors);
+      console.error('OData proxy request failed:', sapConnectionError(error));
+      return send(res, 502, JSON.stringify({ error: sapConnectionError(error) }), undefined, cors);
     }
   }
 
@@ -743,22 +736,21 @@ const server = http.createServer(async (req, res) => {
 
   if (url.pathname === '/api/mail/send-confirmation') {
     if (req.method !== 'POST') return send(res, 405, JSON.stringify({ error: 'POST is required.' }));
+    let payload;
+    try { payload = JSON.parse((await readBody(req)).toString('utf8') || '{}'); }
+    catch { return send(res, 400, JSON.stringify({ error: 'Request must contain valid JSON.' })); }
     try {
-      const payload = JSON.parse((await readBody(req)).toString('utf8') || '{}');
       const email = cleanHeader(payload.toEmail);
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return send(res, 400, JSON.stringify({ error: 'A valid supplier email is required.' }));
       if (!payload.accessToken) return send(res, 400, JSON.stringify({ error: 'An access token is required.' }));
       const config = getSmtpConfig();
       if (!config.SMTP_HOST || !config.SMTP_USER || !config.SMTP_PASSWORD) return send(res, 503, JSON.stringify({ error: 'The supplierportal-smtp-credentials binding or SMTP environment variables are missing.' }));
-      const nodemailer = require('nodemailer');
-      const port = Number(config.SMTP_PORT || 587);
-      const transporter = nodemailer.createTransport({ host: config.SMTP_HOST, port, secure: port === 465, requireTLS: port !== 465, tls: { minVersion: 'TLSv1.2' }, auth: { user: config.SMTP_USER, pass: config.SMTP_PASSWORD } });
       const supplierName = cleanHeader(payload.supplierName) || 'Supplier';
       const senderName = cleanHeader(config.SMTP_SENDER_NAME) || 'Supplier Portal';
       const baseUrl = process.env.PORTAL_BASE_URL || `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000'}`;
       const portalUrl = `${baseUrl.replace(/\/$/, '')}/?token=${encodeURIComponent(payload.accessToken)}#/registration/complete-registration`;
       const detail = (label, value) => `<p><b>${label}:</b> ${escapeHtml(value || '-')}</p>`;
-      await transporter.sendMail({
+      await sendMail(config, {
         from: `"${senderName}" <${config.SMTP_USER}>`, to: email,
         subject: cleanHeader(`Supplier Onboarding Request Received - ${supplierName}`),
         html: `<div style="font-family:Arial,sans-serif;font-size:14px;color:#333"><p>Dear ${escapeHtml(supplierName)},</p><p>Thank you for submitting a supplier onboarding request.</p><p>Please use the link below to continue the supplier onboarding process.</p><p style="margin:25px 0"><a href="${escapeHtml(portalUrl)}" style="background:#123c61;color:#fff;padding:12px 24px;text-decoration:none;border-radius:4px;display:inline-block;font-weight:bold">Open Supplier Onboarding</a></p>${detail('Supplier Name', supplierName)}${detail('Supplier Email', payload.supplierEmail)}${detail('Purchasing Organization', payload.purchasingOrganization)}${detail('Supplier Category', payload.supplierCategory)}<p>Our team will review your request and get back to you shortly.</p><p>Regards,<br>${escapeHtml(senderName)}</p></div>`
@@ -766,7 +758,7 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, JSON.stringify({ status: 'success', message: 'Mail sent successfully.' }));
     } catch (error) {
       console.error('Supplier onboarding confirmation email failed:', error.message);
-      return send(res, 502, JSON.stringify({ error: 'Email could not be sent. Check the SMTP service binding and mail server response.' }));
+      return send(res, error.statusCode || 502, JSON.stringify({ error: mailError(error) }));
     }
   }
 
@@ -786,24 +778,29 @@ const server = http.createServer(async (req, res) => {
       if (!SAP_USERNAME || !SAP_PASSWORD) return send(res, 503, JSON.stringify({ error: 'SAP credentials are not configured on the server.' }));
       const config = getSmtpConfig();
       if (!config.SMTP_HOST || !config.SMTP_USER || !config.SMTP_PASSWORD) return send(res, 503, JSON.stringify({ error: 'The supplierportal-smtp-credentials binding or SMTP environment variables are missing.' }));
-      const supplier = await resolveRfqSupplier(rfqNumber, supplierNumber);
-      const nodemailer = require('nodemailer');
-      const port = Number(config.SMTP_PORT || 587);
-      const transporter = nodemailer.createTransport({ host: config.SMTP_HOST, port, secure: port === 465, requireTLS: port !== 465, tls: { minVersion: 'TLSv1.2' }, auth: { user: config.SMTP_USER, pass: config.SMTP_PASSWORD } });
+      let supplier;
+      try { supplier = await resolveRfqSupplier(rfqNumber, supplierNumber); }
+      catch (error) {
+        if (!error.statusCode) {
+          error.message = `SAP supplier lookup failed: ${sapConnectionError(error)}`;
+          error.statusCode = 502;
+        }
+        throw error;
+      }
       const supplierName = cleanHeader(supplier.name).slice(0, 80) || 'Supplier';
       const senderName = cleanHeader(config.SMTP_SENDER_NAME) || 'Supplier Portal';
       const baseUrl = process.env.PORTAL_BASE_URL || `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000'}`;
       const portalUrl = `${baseUrl.replace(/\/$/, '')}/?token=${encodeURIComponent(supplier.token)}#/rfq/rfq-inbox/${encodeURIComponent(rfqNumber)}`;
       const deadline = cleanHeader(payload.quotationDeadline).slice(0, 80) || 'the stated deadline';
       const subject = cleanHeader(`Submit Your Quotation for RFQ - ${rfqNumber}`);
-      await transporter.sendMail({
+      await sendMail(config, {
         from: `"${senderName}" <${config.SMTP_USER}>`, to: supplier.email, subject,
         html: `<div style="font-family:Arial,sans-serif;font-size:14px;color:#333"><p>Dear ${escapeHtml(supplierName)},</p><p>Please submit your quotation for Request for Quotation <b>${escapeHtml(rfqNumber)}</b>.</p><p>Include unit price and currency, delivery date or lead time, payment terms, quotation validity, and technical specifications or deviations.</p><p>Please submit your response by <b>${escapeHtml(deadline)}</b>.</p><p style="margin:25px 0"><a href="${escapeHtml(portalUrl)}" style="background:#123c61;color:#fff;padding:12px 24px;text-decoration:none;border-radius:4px;display:inline-block;font-weight:bold">Open Supplier Portal</a></p><p>For clarification, contact the Purchase Department.</p><p>Regards,<br>${escapeHtml(senderName)}</p></div>`
       });
       return send(res, 200, JSON.stringify({ status: 'success', message: 'RFQ invitation sent successfully.', email: supplier.email }));
     } catch (error) {
       console.error('RFQ invitation email failed:', error.message);
-      return send(res, error.statusCode || 502, JSON.stringify({ error: error.statusCode ? error.message : 'RFQ email could not be sent. Check the SMTP binding, SAP lookup, and mail server response.' }));
+      return send(res, error.statusCode || 502, JSON.stringify({ error: mailError(error) }));
     }
   }
 
@@ -828,4 +825,4 @@ server.on('error', error => {
   process.exitCode = 1;
 });
 
-server.listen(PORT, '0.0.0.0', () => console.log(`Supplier Connect listening on port ${PORT}`));
+server.listen(PORT, '0.0.0.0', () => console.log(`Supplier Connect listening on port ${server.address().port}`));

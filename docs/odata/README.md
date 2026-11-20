@@ -46,3 +46,14 @@ The service root defaults to the same host as `SAP_ODATA_SERVICE_ROOT`. Set `SAP
 - The RFQ Inbox uses the header set with server-side filters and paging. Opening an RFQ reads its header, item rows, and bidder rows.
 - Bulk and detail-page email invitations verify that the recipient is an RFQ bidder, resolve the bidder's email and invitation token from the supplier onboarding and SAP Creation CBO records, then send through the existing SMTP service binding.
 - The service root defaults to the same SAP host as `SAP_ODATA_SERVICE_ROOT`. Configure `SAP_RFQ_ODATA_SERVICE_ROOT` in `.env` or the Cloud Foundry app environment when it differs.
+
+## Supplier quotation service
+
+- Metadata file: `YY1_RFQ_PORTAL_CDS.metadata.xml` (retrieved from the configured SAP tenant).
+- Service root environment variable: `SAP_RFQ_PORTAL_ODATA_SERVICE_ROOT`.
+- Headers are looked up by the semantic key `Supplier` + `RFQNumber`. New headers use POST `YY1_RFQ_PORTAL`; existing headers use PATCH `YY1_RFQ_PORTAL(guid'...')` with the stored UUID and ETag.
+- The generated `YY1_RFQ_PORTALSap_upsert` function import is not used: live read-only URI validation confirmed that a null date parameter returns `Invalid key predicate`. Entity JSON writes accept nullable dates; a live no-op header PATCH and item PATCH both returned HTTP 204 with unchanged business values on read-back.
+- `InvitationID` comes from the authenticated supplier's onboarding UUID. Supplier identity is resolved on the server; browser-supplied supplier and invitation identifiers are ignored.
+- Header dates and item `DeliveryDate` use the OData V2 JSON `/Date(milliseconds)/` representation or JSON null for blank dates. Decimal values use strings.
+- Items are created under `YY1_RFQ_PORTAL(guid'...')/to_ItemNode`. Repeated saves update existing RFQ item numbers via PATCH on `YY1_ITEMNODE_RFQ_PORTAL`, preserving ETags.
+- Header and item writes are separate requests. If an item write fails after the header succeeds, the response reports failure; retrying finds the existing header by its semantic key and updates items already saved.
