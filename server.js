@@ -236,7 +236,7 @@ async function findRfqEmailDetails(rfqNumbers) {
   }
   return statuses;
 }
-// 
+
 async function saveRfqInvitationItems(parentUuid, sourceItems, csrf) {
   const parentFilter = `SAP_PARENT_UUID eq guid'${parentUuid.toLowerCase()}'`;
   const existingItems = await readSapCollection(
