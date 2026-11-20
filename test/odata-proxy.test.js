@@ -17,6 +17,11 @@ test('OData forwarding, email workflows, and quotation draft/submission', { time
   let quotationSaves = 0;
   let quotationPatches = 0;
   let quotationHeader;
+  const invitationUuid = '22222222-2222-2222-2222-222222222222';
+  let invitationHeader;
+  const invitationItems = [];
+  let emailDetails;
+  let failEmailDetails = false;
   const metadata = fs.readFileSync(path.join(__dirname, '..', 'docs', 'odata', 'YY1_RFQ_PORTAL_CDS.metadata.xml'), 'utf8');
   const importXml = metadata.match(/<FunctionImport Name="YY1_RFQ_PORTALSap_upsert"[\s\S]*?<\/FunctionImport>/)[0];
   const parameterNames = [...importXml.matchAll(/<Parameter Name="([^"]+)"/g)].map(match => match[1]);
@@ -30,16 +35,44 @@ test('OData forwarding, email workflows, and quotation draft/submission', { time
       return res.end(JSON.stringify({ d: { results: [] } }));
     }
     const requestUrl = new URL(req.url, 'http://localhost');
+    if (requestUrl.pathname === '/sap/YY1_EMAILDETAILS_RFQ_PORTAL' && req.method === 'GET') {
+      return res.end(JSON.stringify({ d: { results: emailDetails ? [emailDetails] : [] } }));
+    }
+    if (requestUrl.pathname.endsWith('/to_EmailDetails') || requestUrl.pathname.startsWith('/sap/YY1_EMAILDETAILS_RFQ_PORTAL(')) {
+      if (failEmailDetails) {
+        res.statusCode = 500;
+        return res.end(JSON.stringify({ error: { message: { value: 'Mock tracking failure' } } }));
+      }
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const details = JSON.parse(Buffer.concat(chunks));
+      assert.match(details.EmailDate, /^\/Date\(\d+\)\/$/);
+      assert.match(details.EmailTime, /^PT\d{2}H\d{2}M\d{2}S$/);
+      if (!emailDetails) assert.equal(details.EmailSend, 'Yes');
+      emailDetails = { ...emailDetails, ...details, SAP_UUID: invitationUuid };
+      res.statusCode = req.method === 'POST' ? 201 : 204;
+      return res.end(req.method === 'POST' ? JSON.stringify({ d: emailDetails }) : undefined);
+    }
     if (req.method === 'POST' && requestUrl.pathname === '/sap/YY1_RFQ_PORTALSap_upsert') {
       // Reproduce the live Gateway behavior that the previous mock missed.
       res.statusCode = 400;
       return res.end(JSON.stringify({ error: { message: { value: 'Invalid key predicate' } } }));
     }
     if (requestUrl.pathname === '/sap/YY1_RFQ_PORTAL' || /^\/sap\/YY1_RFQ_PORTAL\(guid'[^']+'\)$/.test(requestUrl.pathname)) {
-      if (req.method === 'GET') return res.end(JSON.stringify({ d: { results: quotationHeader ? [quotationHeader] : [] } }));
+      if (req.method === 'GET') {
+        const found = requestUrl.searchParams.get('$filter')?.includes('7000000002') ? quotationHeader : invitationHeader;
+        return res.end(JSON.stringify({ d: { results: found ? [found] : [] } }));
+      }
       const chunks = [];
       for await (const chunk of req) chunks.push(chunk);
       const payload = JSON.parse(Buffer.concat(chunks));
+      if (!('Status' in payload)) {
+        assert.equal(req.method, 'POST');
+        assert.equal(payload.Supplier, '1001');
+        invitationHeader = { ...payload, SAP_UUID: invitationUuid };
+        res.statusCode = 201;
+        return res.end(JSON.stringify({ d: invitationHeader }));
+      }
       assert.deepEqual(Object.keys(payload).sort(), [...parameterNames].sort());
       assert.equal(payload.InvitationID, uuid);
       assert.equal(payload.Supplier, '1001');
@@ -61,6 +94,15 @@ test('OData forwarding, email workflows, and quotation draft/submission', { time
       return res.end(updating ? undefined : JSON.stringify({ d: quotationHeader }));
     }
     if (requestUrl.pathname.endsWith('/to_ItemNode') || requestUrl.pathname.startsWith('/sap/YY1_ITEMNODE_RFQ_PORTAL(')) {
+      if (requestUrl.pathname.includes(invitationUuid)) {
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        const item = JSON.parse(Buffer.concat(chunks));
+        assert.equal(item.RFQItem, '00010');
+        invitationItems.push(item);
+        res.statusCode = 201;
+        return res.end(JSON.stringify({ d: { ...item, SAP_UUID: invitationUuid } }));
+      }
       if (req.method === 'GET') return res.end(JSON.stringify({ d: { results: quotationItems } }));
       const chunks = [];
       for await (const chunk of req) chunks.push(chunk);
@@ -81,6 +123,8 @@ test('OData forwarding, email workflows, and quotation draft/submission', { time
     }
     if (req.method === 'GET') {
       res.setHeader('ETag', 'W/"test-etag"');
+      if (requestUrl.pathname === '/sap/YY1_ITEMNODE_RFQ_PORTAL') return res.end(JSON.stringify({ d: { results: [] } }));
+      if (requestUrl.pathname === '/sap/RFQ_Item') return res.end(JSON.stringify({ d: { results: [{ RequestForQuotationItem: '00010', RequestedQuantity: '5.000', DeliveryDate: '/Date(1797724800000)/' }] } }));
       if (req.url.startsWith('/sap/YY1_SAPCREATION_SUPPLIER_ONBOA')) {
         if (decodeURIComponent(req.url).includes("'no-link'")) return res.end(JSON.stringify({ d: { results: [] } }));
         return res.end(JSON.stringify({ d: { results: [{ BPNumber: '1001', SAP_PARENT_UUID: uuid }] } }));
@@ -153,6 +197,25 @@ test('OData forwarding, email workflows, and quotation draft/submission', { time
   const invitation = await mail('send-rfq-invitation', { rfqNumber: '7000000001', supplierNumber: '1001' });
   assert.equal(invitation.status, 200);
   assert.equal((await invitation.json()).email, parent.SupplierEmail);
+  assert.equal(invitationItems.length, 1);
+  assert.equal(emailDetails.EmailSend, 'Yes');
+  const duplicate = await mail('send-rfq-invitation', { rfqNumber: '7000000001', supplierNumber: '1001' });
+  assert.equal(duplicate.status, 409);
+  assert.match((await duplicate.json()).error, /Confirm before resending/);
+  const resend = await mail('send-rfq-invitation', { rfqNumber: '7000000001', supplierNumber: '1001', resend: true });
+  assert.equal(resend.status, 200);
+  await resend.arrayBuffer();
+  assert.equal(invitationItems.length, 1);
+  failEmailDetails = true;
+  const trackingFailure = await mail('send-rfq-invitation', { rfqNumber: '7000000001', supplierNumber: '1001', resend: true });
+  assert.equal(trackingFailure.status, 502);
+  const trackingResult = await trackingFailure.json();
+  assert.equal(trackingResult.emailSent, true);
+  assert.equal(trackingResult.trackingSaved, false);
+  failEmailDetails = false;
+  const emailStatus = await fetch(`${base}/api/rfq/email-status`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rfqNumbers: ['7000000001'] }) });
+  assert.equal(emailStatus.status, 200);
+  assert.deepEqual((await emailStatus.json()).existingRfqs, ['7000000001']);
   const missing = await mail('send-rfq-invitation', { rfqNumber: '7000000001', supplierNumber: 'missing' });
   assert.equal(missing.status, 409);
   assert.match((await missing.json()).error, /not listed as a bidder/);
@@ -171,7 +234,7 @@ test('OData forwarding, email workflows, and quotation draft/submission', { time
       'Content-Type': 'application/json', 'X-Supplier-Access-Token': token
     }, body: JSON.stringify(body) });
   }
-  const quotation = { RFQNumber: '7000000001', InvitationID: 'untrusted-browser-value', Supplier: 'untrusted',
+  const quotation = { RFQNumber: '7000000002', InvitationID: 'untrusted-browser-value', Supplier: 'untrusted',
     HeaderRemarks: "Supplier's quotation", Items: [{ RFQItem: '00010', QuotedQuantity: 5, Price: '25.50', DeliveryDate: '2026-12-20' }] };
   const draft = await saveQuotation({ ...quotation, Status: '02' });
   assert.equal(draft.status, 200, await draft.text());

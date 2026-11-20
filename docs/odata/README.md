@@ -45,6 +45,8 @@ The service root defaults to the same host as `SAP_ODATA_SERVICE_ROOT`. Set `SAP
 - Entity sets: `RFQ_Header`, `RFQ_Bidder`, and `RFQ_Item`. The metadata marks these sets read-only.
 - The RFQ Inbox uses the header set with server-side filters and paging. Opening an RFQ reads its header, item rows, and bidder rows.
 - Bulk and detail-page email invitations verify that the recipient is an RFQ bidder, resolve the bidder's email and invitation token from the supplier onboarding and SAP Creation CBO records, then send through the existing SMTP service binding.
+- Before sending, the portal checks whether each selected RFQ already has a `YY1_RFQ_PORTAL` CBO parent. It asks once in a confirmation dialog if any exist; declining cancels the batch. For new RFQ/supplier records, the portal creates the parent with the RFQ deadline and currency and creates `to_ItemNode` rows with the RFQ item, description, requested quantity, and expected delivery date before sending the invitation.
+- After an invitation is delivered, the portal creates the `to_EmailDetails` child in `YY1_EMAILDETAILS_RFQ_PORTAL` with `EmailSend = Yes` and the send date/time. On a confirmed resend, it leaves the existing RFQ and item records unchanged and updates only the email date/time.
 - The service root defaults to the same SAP host as `SAP_ODATA_SERVICE_ROOT`. Configure `SAP_RFQ_ODATA_SERVICE_ROOT` in `.env` or the Cloud Foundry app environment when it differs.
 
 ## Supplier quotation service

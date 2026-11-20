@@ -4,7 +4,7 @@ An SAP Fiori-inspired supplier portal built from the supplied slide mockups. It 
 
 ## Run locally
 
-Requires Node.js 20 or newer. Create a local `.env` file from `.env.example`, then replace the SAP and mail placeholders with your actual values. The Node server loads `.env` at startup; the checked-in example file itself is only a template. The onboarding email uses the `supplierportal-smtp-credentials` Cloud Foundry user-provided service, or the SMTP variables in `.env` for local use. The ZIP includes the service name and binding configuration, but no actual SMTP address or password.
+Requires Node.js 20 or newer. Create a local `.env` file from `.env.example`, then replace the SAP and mail placeholders with your actual values. The RFQ inbox requires `SAP_USERNAME` and `SAP_PASSWORD`, plus the correct `SAP_RFQ_ODATA_SERVICE_ROOT` for your SAP system. The Node server loads `.env` at startup; restart it after changing the file. The checked-in example file itself is only a template. The onboarding email uses the `supplierportal-smtp-credentials` Cloud Foundry user-provided service, or the SMTP variables in `.env` for local use.
 
 ```powershell
 Copy-Item .env.example .env
