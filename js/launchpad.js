@@ -90,12 +90,19 @@
     Portal.$('#view-label').textContent = contextLabel;
     const items = module.id === 'registration' ? registrationItems()
       : module.id === 'rfq' && !emailMode ? module.items.filter(item => ['RFQ Inbox', 'Quotation Tracking'].includes(item[1]))
+      : module.id === 'po' && emailMode ? module.items.filter(item => item[1] !== 'Open PO Report')
       : module.items;
     content.innerHTML = `<div class="section-caption"><strong>${Portal.escapeHtml(module.subtitle)}</strong><span class="supplier-badge">${contextLabel}</span></div><div class="tile-grid row row-cols-1 row-cols-sm-2 row-cols-xl-3 row-cols-xxl-4 g-3 g-xl-4">${items.map(item => Portal.iconTile(item)).join('')}</div>`;
     Portal.bindTiles(content);
   }
 
   function showFeature(detail, updateRoute = true, recordId = '') {
+    if (current === 'po' && detail.title === 'Open PO Report') {
+      if (emailMode) { writeRoute('po', '', true); renderModule(modules.find(module => module.id === 'po')); return; }
+      if (updateRoute) writeRoute('po', detail.title, false, recordId);
+      window.OpenPoReport.render(content, () => setActive('po'), recordId);
+      return;
+    }
     if (updateRoute) writeRoute(current, detail.title, false, recordId);
     if (current === 'registration' && detail.title === 'Create Supplier Request' && !emailMode) {
       Portal.$('#page-title').textContent = 'Create Supplier Request';

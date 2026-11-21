@@ -1,0 +1,106 @@
+/* The shell fits the device; only working content scrolls. */
+html { height: 100%; overflow: hidden; }
+body { height: 100vh; height: 100dvh; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+.app-header { position: relative; top: auto; flex: 0 0 44px; height: 44px; }
+.brand-logo { max-height: 28px; width: 56px; }
+.top-nav { position: relative; top: auto; flex: 0 0 38px; min-height: 38px; }
+.nav-scroll { height: 38px; min-height: 38px; }
+.page-shell { flex: 1 1 0; min-height: 0; overflow: hidden; padding: 10px clamp(12px, 2.5vw, 40px) 5px; }
+.page-heading { flex: 0 0 auto; margin-bottom: 8px; gap: 12px; align-items: center; }
+.page-heading h1 { font-size: 22px; line-height: 1.15; }
+.page-heading .eyebrow { font-size: 9px; margin-bottom: 2px; }
+.page-heading #page-subtitle { font-size: 12px; margin-top: 2px; }
+.heading-meta { gap: 10px; font-size: 11px; }
+.company-label { padding: 5px 9px; }
+.content-area { flex: 1 1 0; min-height: 0; min-width: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.content-area > * { flex-shrink: 0; min-width: 0; }
+.page-shell > footer { flex: 0 0 auto; padding: 4px 0 0; font-size: 10px; line-height: 14px; }
+.section-caption { margin-bottom: 8px; }
+.app-tile { min-height: clamp(105px, 17vh, 165px); padding: 14px; }
+.content-area .button-primary,.content-area .button-secondary { min-height: 28px; padding: 5px 10px; font-size: 12px; }
+
+/* PO lists reserve all remaining height for their rows and keep paging visible. */
+.content-area:has(> .po-report) { overflow: hidden; scrollbar-gutter: auto; }
+.content-area > .po-report { flex: 1 1 0; min-height: 0; gap: 6px; overflow: hidden; }
+.po-list { grid-template-columns: 180px minmax(0, 1fr); grid-template-rows: auto auto minmax(0, 1fr) auto; }
+.po-list > .po-toolbar { grid-column: 1; grid-row: 1; gap: 5px; justify-content: start; align-self: end; padding-bottom: 10px; }
+.po-list > .po-filters { grid-column: 2; grid-row: 1; padding: 8px 10px; gap: 7px; margin: 0; }
+.po-list .po-filters label { min-width: 90px; gap: 3px; font-size: 11px; }
+.po-list .po-filters label:not(.po-check) { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.po-list .po-filters .form-control { min-width: 0; }
+.po-list .po-filters .po-check { min-width: 135px; font-size: 11px; }
+.po-list .form-control { min-height: 29px; padding: 4px 7px; font-size: 12px; }
+.po-list > .po-message { grid-column: 1 / -1; grid-row: 2; font-size: 12px; line-height: 18px; }
+.po-list > .po-results { grid-column: 1 / -1; grid-row: 3; min-height: 0; display: flex; }
+.po-list .po-table-scroll { flex: 1; min-height: 0; max-height: none; }
+.po-list > .po-pagination { grid-column: 1 / -1; grid-row: 4; font-size: 12px; }
+.po-table th,.po-table td { padding: 9px 11px; }
+.po-detail { grid-template-rows: auto auto minmax(0, 1fr); }
+.po-detail > [data-po-sections] { min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.po-detail .po-section { padding: 16px; margin-bottom: 10px; }
+.po-section-heading { margin-bottom: 12px; }
+.po-field-grid { gap: 12px 20px; }
+.po-item summary { padding: 12px 14px; }
+.po-item-body { padding: 16px; }
+.po-empty { padding: 14px; }
+
+/* Existing RFQ lists use an internal table viewport, with filters and paging fixed. */
+.content-area:has(> .rfq-list-card) { overflow: hidden; scrollbar-gutter: auto; }
+.content-area > .rfq-list-card { flex: 1 1 0; min-height: 0; overflow: auto; display: flex; flex-direction: column; margin-bottom: 0; }
+.rfq-list-card > * { flex-shrink: 0; }
+.rfq-list-card > .rfq-table-wrap { flex: 1 1 120px; min-height: 80px; overflow: auto; }
+.rfq-list-card .rfq-list-heading { margin-bottom: 5px; }
+.rfq-list-card .rfq-list-heading h2 { font-size: 16px; }
+.rfq-list-card .rfq-filters { gap: 5px 8px; margin-bottom: 5px; }
+.rfq-list-card .rfq-message { padding: 4px 0; margin: 0; font-size: 12px; }
+.rfq-list-card .rfq-filters label { font-size: 11px; }
+.rfq-list-card .rfq-filters .form-control { min-height: 28px; padding: 3px 7px; font-size: 12px; }
+.content-area:has(> .approval-list-card) { overflow: hidden; scrollbar-gutter: auto; }
+.content-area > .approval-list-card { flex: 1 1 0; min-height: 0; overflow: auto; display: flex; flex-direction: column; margin-bottom: 0; padding: 12px; }
+.approval-list-card > * { flex-shrink: 0; }
+.approval-list-card > .approval-table-wrap { flex: 1 1 100px; min-height: 80px; max-height: none; overflow: auto; }
+.approval-list-card .approval-list-heading { margin-bottom: 6px; }
+.approval-list-card .approval-list-heading h2 { font-size: 16px; }
+.approval-list-card .approval-message { padding: 4px 0; font-size: 12px; }
+.content-area .rfq-table thead th,.content-area .approval-table thead th { font-size: 12px; padding: 8px 10px; }
+.content-area .rfq-table tbody td,.content-area .approval-table tbody td { font-size: 13px; padding: 7px 10px; }
+
+@media (max-width: 1100px) {
+  .po-list { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto auto minmax(0, 1fr) auto; }
+  .po-list > .po-toolbar { grid-column: 1; grid-row: 1; justify-content: space-between; padding: 0; }
+  .po-list > .po-filters { grid-column: 1; grid-row: 2; }
+  .po-list > .po-message { grid-row: 3; }
+  .po-list > .po-results { grid-row: 4; }
+  .po-list > .po-pagination { grid-row: 5; }
+}
+@media (max-width: 680px) {
+  .page-shell { padding: 7px 10px 4px; }
+  .page-heading { flex-direction: row; align-items: center; gap: 6px; }
+  .page-heading h1 { font-size: 18px; }
+  .page-heading #page-subtitle { display: none; }
+  .heading-meta { flex-direction: row; }
+  .heading-meta .date-label { display: none; }
+  .company-label #supplier-company-name { max-width: 30vw; }
+  .po-list > .po-filters { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); padding: 6px; gap: 5px; }
+  .po-list .po-filters label,.po-list .po-filters .po-check { min-width: 0; }
+  .po-list .po-filters label:not(.po-check) { display: grid; gap: 3px; }
+  .po-list .po-filters .po-check { font-size: 10px; }
+  .po-list > .po-message { font-size: 11px; line-height: 15px; }
+  .po-section-heading h2 { font-size: 16px; }
+  .app-tile { min-height: 105px; }
+}
+@media (max-height: 700px) {
+  .page-shell > footer { display: none; }
+  .page-heading #page-subtitle { display: none; }
+  .app-tile { min-height: 100px; }
+  .rfq-list-heading p,.approval-list-heading p { display: none; }
+}
+@media (max-height: 450px) {
+  .app-header { flex-basis: 34px; height: 34px; }
+  .brand-logo { max-height: 24px; }
+  .top-nav { flex-basis: 30px; min-height: 30px; }
+  .nav-scroll { min-height: 30px; height: 30px; }
+  .page-heading .eyebrow,.heading-meta { display: none; }
+  .page-heading h1 { font-size: 17px; }
+  .content-area > .po-list { overflow: auto; grid-template-rows: auto auto auto minmax(90px,1fr) auto; }
+}

@@ -8,10 +8,11 @@ const services = [
   ['Onboarding', root, 'YY1_SUPPLIER_ONBOARDING'],
   ['RFQ', process.env.SAP_RFQ_ODATA_SERVICE_ROOT || `${new URL(root).origin}/sap/opu/odata/sap/Z_RFQ_SUPP_PORTAL_SB`, 'RFQ_Header'],
   ['Quotation', process.env.SAP_RFQ_PORTAL_ODATA_SERVICE_ROOT || `${new URL(root).origin}/sap/opu/odata/sap/YY1_RFQ_PORTAL_CDS`, 'YY1_RFQ_PORTAL'],
-  ['Business partner', process.env.SAP_BP_ODATA_SERVICE_ROOT || `${new URL(root).origin}/sap/opu/odata/sap/API_BUSINESS_PARTNER`, 'A_BusinessPartner']
+  ['Business partner', process.env.SAP_BP_ODATA_SERVICE_ROOT || `${new URL(root).origin}/sap/opu/odata/sap/API_BUSINESS_PARTNER`, 'A_BusinessPartner'],
+  ['Open PO', process.env.SAP_OPEN_PO_ODATA_SERVICE_ROOT || `${new URL(root).origin}/sap/opu/odata4/sap/z_openpo_supp_portal_sb/srvd_a2x/sap/z_openpo_supp_portal_sd/0001`, 'OpenPOHeader', false]
 ];
 
-async function check([name, serviceRoot, entity]) {
+async function check([name, serviceRoot, entity, checkCsrf = true]) {
   try {
     const url = new URL(serviceRoot);
     if (url.hostname === 'your-sap-host') throw new Error('Replace your-sap-host in .env with your actual SAP tenant hostname.');
@@ -22,9 +23,9 @@ async function check([name, serviceRoot, entity]) {
       });
       await response.arrayBuffer();
       if (!response.ok) throw new Error(`HTTP ${response.status} at ${suffix}; check service activation and user authorizations.`);
-      if (suffix !== '$metadata' && !response.headers.get('x-csrf-token')) throw new Error('Read succeeded but SAP did not return a CSRF token for writes.');
+      if (checkCsrf && suffix !== '$metadata' && !response.headers.get('x-csrf-token')) throw new Error('Read succeeded but SAP did not return a CSRF token for writes.');
     }
-    console.log(`PASS ${name}: metadata, entity GET, and CSRF token retrieval (${url.hostname}).`);
+    console.log(`PASS ${name}: metadata, entity GET${checkCsrf ? ', and CSRF token retrieval' : ' (read-only)'} (${url.hostname}).`);
   } catch (error) {
     process.exitCode = 1;
     console.error(`FAIL ${name}: ${error.message}${error.cause?.code ? ` (${error.cause.code})` : ''}`);
