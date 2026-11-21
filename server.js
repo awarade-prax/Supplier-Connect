@@ -3,6 +3,7 @@
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
+const { randomBytes } = require('node:crypto');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 const { getSmtpConfig, sendMail, mailError } = require('./lib/mail');
 const { prepareQuotation } = require('./lib/quotation');
@@ -14,6 +15,10 @@ const SERVICE_ROOT = (process.env.SAP_ODATA_SERVICE_ROOT || 'https://my426023-ap
 const BP_SERVICE_ROOT = (process.env.SAP_BP_ODATA_SERVICE_ROOT || `${new URL(SERVICE_ROOT).origin}/sap/opu/odata/sap/API_BUSINESS_PARTNER`).replace(/\/$/, '');
 const RFQ_SERVICE_ROOT = (process.env.SAP_RFQ_ODATA_SERVICE_ROOT || `${new URL(SERVICE_ROOT).origin}/sap/opu/odata/sap/Z_RFQ_SUPP_PORTAL_SB`).replace(/\/$/, '');
 const RFQ_PORTAL_SERVICE_ROOT = (process.env.SAP_RFQ_PORTAL_ODATA_SERVICE_ROOT || `${new URL(SERVICE_ROOT).origin}/sap/opu/odata/sap/YY1_RFQ_PORTAL_CDS`).replace(/\/$/, '');
+const RFQ_FALLBACK_EMAIL = 'a.warade@praxisinfosolutions.com';
+const RFQ_INVITATION_TOKEN = /^rfq_[a-f0-9]{64}$/;
+const SAP_UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+const rfqInvitationQueues = new Map();
 const OPEN_PO_SERVICE_ROOT = (process.env.SAP_OPEN_PO_ODATA_SERVICE_ROOT || `${new URL(SERVICE_ROOT).origin}/sap/opu/odata4/sap/z_openpo_supp_portal_sb/srvd_a2x/sap/z_openpo_supp_portal_sd/0001`).replace(/\/$/, '');
 const OPEN_PO_ENTITY_SETS = new Set(['OpenPOHeader', 'OpenPOItem', 'OpenPOItemHistorySum', 'OpenPOItemScheduleSum']);
 const SAP_USERNAME = process.env.SAP_USERNAME || '';
@@ -123,21 +128,31 @@ async function readSapCollection(serviceRoot, entitySet, query) {
 }
 
 async function resolveRfqSupplierByAccessToken(accessToken) {
+  if (RFQ_INVITATION_TOKEN.test(accessToken)) {
+    const items = await readSapCollection(RFQ_PORTAL_SERVICE_ROOT, 'YY1_ITEMNODE_RFQ_PORTAL',
+      `?$filter=${encodeURIComponent(`AccessToken eq '${accessToken}'`)}&$select=SAP_UUID,Supplier,RFQNumber,AccessToken&$top=2`);
+    const item = items[0];
+    const supplierNumber = String(item?.Supplier || '').trim();
+    const rfqNumber = String(item?.RFQNumber || '').trim();
+    if (items.length !== 1 || item.AccessToken !== accessToken || !SAP_UUID.test(item.SAP_UUID) || !supplierNumber || !rfqNumber)
+      throw Object.assign(new Error('The supplier invitation token is invalid.'), { statusCode: 401 });
+    return { invitationId: item.SAP_UUID, supplierNumber, rfqNumber };
+  }
   const parent = await getSupplierByAccessToken(accessToken);
   if (!parent?.SAP_UUID) throw Object.assign(new Error('The supplier invitation token is invalid.'), { statusCode: 401 });
   const filter = `SAP_PARENT_UUID eq guid'${String(parent.SAP_UUID).toLowerCase()}'`;
   const records = await readSapCollection(SERVICE_ROOT, 'YY1_SAPCREATION_SUPPLIER_ONBOA', `?$filter=${encodeURIComponent(filter)}&$select=SupplierNumber,BPNumber&$top=10`);
   const supplierNumber = String(records.find(record => record.SupplierNumber)?.SupplierNumber || records.find(record => record.BPNumber)?.BPNumber || '').trim();
   if (!supplierNumber) throw Object.assign(new Error('This supplier invitation is not linked to an SAP supplier number yet.'), { statusCode: 409 });
-  return { parent, supplierNumber };
+  return { invitationId: parent.SAP_UUID, supplierNumber };
 }
 
 function rfqEmailDateTime(date) {
   const pad = value => String(value).padStart(2, '0');
   const dateMilliseconds = Date.UTC(date.getFullYear(), date.getMonth(), date.getDate());
   return {
-    EmailDate: `/Date(${dateMilliseconds})/`,
-    EmailTime: `PT${pad(date.getHours())}H${pad(date.getMinutes())}M${pad(date.getSeconds())}S`
+    LastEmailSentOnDate: `/Date(${dateMilliseconds})/`,
+    LastEmailSentatTime: `PT${pad(date.getHours())}H${pad(date.getMinutes())}M${pad(date.getSeconds())}S`
   };
 }
 
@@ -173,9 +188,9 @@ async function findExistingRfqNumbers(rfqNumbers) {
 }
 
 function rfqEmailSentAt(details) {
-  const dateMatch = typeof details.EmailDate === 'string' && details.EmailDate.match(/^\/Date\((-?\d+)/);
-  const date = dateMatch ? Number(dateMatch[1]) : Date.parse(details.EmailDate);
-  const timeMatch = String(details.EmailTime || '').match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/);
+  const dateMatch = typeof details.LastEmailSentOnDate === 'string' && details.LastEmailSentOnDate.match(/^\/Date\((-?\d+)/);
+  const date = dateMatch ? Number(dateMatch[1]) : Date.parse(details.LastEmailSentOnDate);
+  const timeMatch = String(details.LastEmailSentatTime || '').match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/);
   const timeSeconds = timeMatch
     ? Number(timeMatch[1] || 0) * 3600 + Number(timeMatch[2] || 0) * 60 + Number(timeMatch[3] || 0)
     : 0;
@@ -194,16 +209,14 @@ async function findRfqEmailDetails(rfqNumbers) {
     'YY1_RFQ_PORTAL',
     `?$filter=${encodeURIComponent(rfqFilter)}&$select=SAP_UUID,RFQNumber&$top=5000`
   );
-  const parentGroups = new Map();
+  const uuidToRfq = new Map();
   for (const parent of parents) {
     const rfqNumber = String(parent.RFQNumber || '').trim();
     const parentUuid = String(parent.SAP_UUID || '');
-    if (!statuses[rfqNumber] || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(parentUuid)) continue;
-    if (!parentGroups.has(rfqNumber)) parentGroups.set(rfqNumber, []);
-    parentGroups.get(rfqNumber).push(parentUuid);
+    if (Object.hasOwn(statuses, rfqNumber) && SAP_UUID.test(parentUuid)) uuidToRfq.set(parentUuid.toLowerCase(), rfqNumber);
   }
 
-  const parentUuids = [...parentGroups.values()].flat();
+  const parentUuids = [...uuidToRfq.keys()];
   const emailDetails = [];
   for (let offset = 0; offset < parentUuids.length; offset += 50) {
     const parentFilter = parentUuids.slice(offset, offset + 50)
@@ -211,18 +224,14 @@ async function findRfqEmailDetails(rfqNumbers) {
       .join(' or ');
     emailDetails.push(...await readSapCollection(
       RFQ_PORTAL_SERVICE_ROOT,
-      'YY1_EMAILDETAILS_RFQ_PORTAL',
-      `?$filter=${encodeURIComponent(parentFilter)}&$select=SAP_PARENT_UUID,EmailSend,EmailDate,EmailTime&$top=1000`
+      'YY1_ITEMNODE_RFQ_PORTAL',
+      `?$filter=${encodeURIComponent(`(${parentFilter}) and EmailSent eq 'Yes'`)}&$select=SAP_PARENT_UUID,EmailSent,LastEmailSentOnDate,LastEmailSentatTime&$orderby=LastEmailSentOnDate desc,LastEmailSentatTime desc&$top=1000`
     ));
   }
 
-  const uuidToRfq = new Map();
-  for (const [rfqNumber, uuids] of parentGroups) {
-    for (const uuid of uuids) uuidToRfq.set(uuid.toLowerCase(), rfqNumber);
-  }
   const latestSentAt = new Map();
   for (const details of emailDetails) {
-    if (String(details.EmailSend || '').trim().toLowerCase() !== 'yes') continue;
+    if (String(details.EmailSent || '').trim().toLowerCase() !== 'yes') continue;
     const rfqNumber = uuidToRfq.get(String(details.SAP_PARENT_UUID || '').toLowerCase());
     if (!rfqNumber) continue;
     const sentAt = rfqEmailSentAt(details);
@@ -230,140 +239,92 @@ async function findRfqEmailDetails(rfqNumbers) {
     latestSentAt.set(rfqNumber, sentAt);
     statuses[rfqNumber] = {
       emailSend: 'Yes',
-      emailDate: details.EmailDate || '',
-      emailTime: details.EmailTime || ''
+      emailDate: details.LastEmailSentOnDate || '',
+      emailTime: details.LastEmailSentatTime || ''
     };
   }
   return statuses;
 }
 
-async function saveRfqInvitationItems(parentUuid, rfqNumber, sourceItems, supplier, csrf) {
-  const parentFilter = `SAP_PARENT_UUID eq guid'${parentUuid.toLowerCase()}'`;
-  const existingItems = await readSapCollection(
-    RFQ_PORTAL_SERVICE_ROOT,
-    'YY1_ITEMNODE_RFQ_PORTAL',
-    `?$filter=${encodeURIComponent(parentFilter)}&$select=SAP_UUID,Supplier,SupplierName,RFQNumber,SupplierEmail,AccessToken&$top=1000`
-  );
-  const supplierNumber = String(supplier.supplierNumber || '').trim();
-  const accessToken = String(supplier.token || '').trim();
-  if (!supplierNumber || !accessToken) throw new Error('The supplier number and unique access token are required.');
-  const conflicting = existingItems.find(item =>
-    String(item.AccessToken || '').trim() === accessToken &&
-    String(item.Supplier || '').trim() !== supplierNumber
-  );
-  if (conflicting) throw Object.assign(new Error('This access token is already assigned to a different supplier.'), { statusCode: 409 });
-  const existing = existingItems.find(item =>
-    String(item.Supplier || '').trim() === supplierNumber ||
-    String(item.AccessToken || '').trim() === accessToken
-  );
-  const headers = { ...sapAuthHeaders(), 'X-CSRF-Token': csrf.token, ...(csrf.cookies ? { Cookie: csrf.cookies } : {}), 'Content-Type': 'application/json' };
-  if (existing && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(existing.SAP_UUID || '')))
-    throw new Error('SAP returned an invalid CBO UUID for the supplier record.');
-  const data = {
-    Supplier: supplierNumber,
-    SupplierName: String(supplier.name || '').slice(0, 50),
-    RFQNumber: String(rfqNumber || '').slice(0, 20),
-    SupplierEmail: String(supplier.email || '').slice(0, 30),
-    AccessToken: accessToken
-  };
-  const target = existing
-    ? `${RFQ_PORTAL_SERVICE_ROOT}/YY1_ITEMNODE_RFQ_PORTAL(guid'${existing.SAP_UUID}')`
-    : `${RFQ_PORTAL_SERVICE_ROOT}/YY1_RFQ_PORTAL(guid'${parentUuid}')/to_ItemNode`;
-  const response = await fetch(target, {
-    method: existing ? 'PATCH' : 'POST',
-    headers: existing ? { ...headers, 'If-Match': '*' } : headers,
-    body: JSON.stringify(data)
-  });
-  await sapJson(response, existing ? 'Update RFQ supplier record' : 'Create RFQ supplier record');
-}
-
 async function prepareRfqInvitationCboData(rfqNumber, supplierNumber, supplier, resend) {
-  const quote = value => String(value).replace(/'/g, "''");
-  const filter = `RequestForQuotation eq '${quote(rfqNumber)}'`;
-  const [rfqHeaders, sourceItems] = await Promise.all([
-    readSapCollection(RFQ_SERVICE_ROOT, 'RFQ_Header', `?$filter=${encodeURIComponent(filter)}&$select=RequestForQuotation,QuotationDeadline,DocumentCurrency&$top=1`),
-    readSapCollection(RFQ_SERVICE_ROOT, 'RFQ_Item', `?$filter=${encodeURIComponent(filter)}&$select=RequestForQuotationItem,ShortText,Material,RequestedQuantity,DeliveryDate&$top=500`)
+  const quote = value => value.replace(/'/g, "''");
+  const headerFilter = `RequestForQuotation eq '${quote(rfqNumber)}'`;
+  const [rfqHeaders, parents] = await Promise.all([
+    readSapCollection(RFQ_SERVICE_ROOT, 'RFQ_Header', `?$filter=${encodeURIComponent(headerFilter)}&$select=RequestForQuotation,QuotationDeadline,DocumentCurrency&$top=1`),
+    findRfqPortalParents(rfqNumber)
   ]);
   if (!rfqHeaders.length) throw new Error('The RFQ header could not be found in SAP.');
-  if (sourceItems.length >= 500) throw new Error('This RFQ has 500 or more items; the CBO item sync limit was reached.');
-
-  const parents = await findRfqPortalParents(rfqNumber);
   if (parents.length > 1) throw new Error(`SAP returned multiple CBO headers for RFQ ${rfqNumber}. Resolve duplicates before sending invitations.`);
-  let parentUuid = String(parents[0]?.SAP_UUID || '');
-  const csrf = await getCsrf('YY1_RFQ_PORTAL', RFQ_PORTAL_SERVICE_ROOT);
 
+  const dueDate = rfqDateIso(rfqHeaders[0].QuotationDeadline);
+  const csrf = await getCsrf('YY1_RFQ_PORTAL', RFQ_PORTAL_SERVICE_ROOT);
+  const headers = { ...sapAuthHeaders(), 'X-CSRF-Token': csrf.token, ...(csrf.cookies ? { Cookie: csrf.cookies } : {}), 'Content-Type': 'application/json' };
+  let parentUuid = parents[0]?.SAP_UUID;
   if (!parents.length) {
-    const dueDate = rfqDateIso(rfqHeaders[0].QuotationDeadline);
     const parentData = { RFQNumber: rfqNumber };
     if (dueDate) parentData.RFQdueDate = rfqDateEdmValue(dueDate);
-    const currency = String(rfqHeaders[0].DocumentCurrency || '').trim().slice(0, 5);
+    const currency = String(rfqHeaders[0].DocumentCurrency || '').trim();
     if (currency) parentData.Currency = currency;
     const response = await fetch(`${RFQ_PORTAL_SERVICE_ROOT}/YY1_RFQ_PORTAL`, {
-      method: 'POST',
-      headers: { ...sapAuthHeaders(), 'X-CSRF-Token': csrf.token, ...(csrf.cookies ? { Cookie: csrf.cookies } : {}), 'Content-Type': 'application/json' },
-      body: JSON.stringify(parentData)
+      method: 'POST', headers, body: JSON.stringify(parentData)
     });
     const parent = await sapJson(response, 'Create RFQ CBO header');
-    const locationUuid = response.headers.get('location')?.match(/guid'([0-9a-f-]{36})'/i)?.[1];
-    parentUuid = String(parent?.SAP_UUID || locationUuid || '');
+    parentUuid = parent.SAP_UUID || response.headers.get('location')?.match(/guid'([0-9a-f-]{36})'/i)?.[1];
+  }
+  if (!SAP_UUID.test(parentUuid)) throw new Error('SAP did not return a valid RFQ CBO header UUID.');
+
+  const supplierMatch = `Supplier eq '${quote(supplierNumber)}'`;
+  const identityFilter = supplier.token ? `(${supplierMatch} or AccessToken eq '${supplier.token}')` : supplierMatch;
+  const supplierFilter = `SAP_PARENT_UUID eq guid'${parentUuid.toLowerCase()}' and ${identityFilter}`;
+  const items = await readSapCollection(RFQ_PORTAL_SERVICE_ROOT, 'YY1_ITEMNODE_RFQ_PORTAL',
+    `?$filter=${encodeURIComponent(supplierFilter)}&$select=SAP_UUID,Supplier,SupplierName,RFQNumber,SupplierEmail,AccessToken,EmailSent&$top=2`);
+  if (items.some(item => String(item.Supplier || '').trim() !== supplierNumber))
+    throw Object.assign(new Error('This access token is already assigned to a different supplier.'), { statusCode: 409 });
+  if (items.length > 1)
+    throw Object.assign(new Error('SAP returned multiple invitation records for this RFQ and supplier.'), { statusCode: 409 });
+  const existing = items[0];
+  if (existing && !SAP_UUID.test(existing.SAP_UUID)) throw new Error('SAP returned an invalid CBO UUID for the supplier record.');
+  if (!resend && String(existing?.EmailSent || '').trim().toLowerCase() === 'yes')
+    throw Object.assign(new Error('An invitation was already sent to this supplier. Confirm before resending the invitation.'), { statusCode: 409 });
+
+  const existingToken = existing?.AccessToken || '';
+  const token = supplier.token || (RFQ_INVITATION_TOKEN.test(existingToken) ? existingToken : `rfq_${randomBytes(32).toString('hex')}`);
+  const data = {
+    Supplier: supplierNumber,
+    SupplierName: supplier.name.slice(0, 50),
+    RFQNumber: rfqNumber,
+    SupplierEmail: supplier.email.length <= 30 ? supplier.email : '',
+    AccessToken: token
+  };
+  const itemUrl = uuid => `${RFQ_PORTAL_SERVICE_ROOT}/YY1_ITEMNODE_RFQ_PORTAL(guid'${uuid}')`;
+  if (existing) {
+    if (Object.entries(data).some(([field, value]) => (existing[field] ?? '') !== value)) {
+      const response = await fetch(itemUrl(existing.SAP_UUID), {
+        method: 'PATCH',
+        headers: { ...headers, 'If-Match': existing.__metadata?.etag || '*' },
+        body: JSON.stringify(data)
+      });
+      await sapJson(response, 'Update RFQ supplier record');
+    }
+    return { itemUrl: itemUrl(existing.SAP_UUID), headers, token, dueDate };
   }
 
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(parentUuid))
-    throw new Error('SAP did not return a valid RFQ CBO header UUID.');
-
-  const supplierFilter = `SAP_PARENT_UUID eq guid'${parentUuid.toLowerCase()}' and (Supplier eq '${String(supplierNumber).replace(/'/g, "''")}' or AccessToken eq '${String(supplier.token || '').replace(/'/g, "''")}')`;
-  const supplierItems = await readSapCollection(
-    RFQ_PORTAL_SERVICE_ROOT,
-    'YY1_ITEMNODE_RFQ_PORTAL',
-    `?$filter=${encodeURIComponent(supplierFilter)}&$select=SAP_UUID&$top=1`
-  );
-  if (supplierItems.length && !resend)
-    throw Object.assign(new Error('RFQ details already exist for this supplier in the CBO. Confirm before resending the invitation.'), { statusCode: 409 });
-
-  await saveRfqInvitationItems(parentUuid, rfqNumber, sourceItems, {
-    supplierNumber,
-    name: supplier.name,
-    email: supplier.email,
-    token: supplier.token
-  }, csrf);
-  return parentUuid;
+  const response = await fetch(`${RFQ_PORTAL_SERVICE_ROOT}/YY1_RFQ_PORTAL(guid'${parentUuid}')/to_ItemNode`, {
+    method: 'POST', headers, body: JSON.stringify({ ...data, EmailSent: 'No' })
+  });
+  const item = await sapJson(response, 'Create RFQ supplier record');
+  const itemUuid = item.SAP_UUID || response.headers.get('location')?.match(/guid'([0-9a-f-]{36})'/i)?.[1];
+  if (!SAP_UUID.test(itemUuid)) throw new Error('SAP did not return a valid CBO UUID for the supplier record.');
+  return { itemUrl: itemUrl(itemUuid), headers, token, dueDate };
 }
 
-async function saveRfqInvitationEmailDetails(parentUuid) {
-  const csrf = await getCsrf('YY1_RFQ_PORTAL', RFQ_PORTAL_SERVICE_ROOT);
-  const details = await readSapCollection(
-    RFQ_PORTAL_SERVICE_ROOT,
-    'YY1_EMAILDETAILS_RFQ_PORTAL',
-    `?$filter=${encodeURIComponent(`SAP_PARENT_UUID eq guid'${parentUuid.toLowerCase()}'`)}&$select=SAP_UUID&$top=1`
-  );
-  const timestamp = rfqEmailDateTime(new Date());
-  const requestHeaders = {
-    ...sapAuthHeaders(),
-    'X-CSRF-Token': csrf.token,
-    ...(csrf.cookies ? { Cookie: csrf.cookies } : {}),
-    'Content-Type': 'application/json'
-  };
-  let response;
-  let operation;
-  if (details.length) {
-    const detailUuid = String(details[0].SAP_UUID || '');
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(detailUuid))
-      throw new Error('SAP returned an invalid email-details node UUID.');
-    response = await fetch(`${RFQ_PORTAL_SERVICE_ROOT}/YY1_EMAILDETAILS_RFQ_PORTAL(guid'${detailUuid}')`, {
-      method: 'PATCH',
-      headers: { ...requestHeaders, 'If-Match': '*' },
-      body: JSON.stringify(timestamp)
-    });
-    operation = 'Update RFQ invitation email details';
-  } else {
-    response = await fetch(`${RFQ_PORTAL_SERVICE_ROOT}/YY1_RFQ_PORTAL(guid'${parentUuid}')/to_EmailDetails`, {
-      method: 'POST',
-      headers: requestHeaders,
-      body: JSON.stringify({ EmailSend: 'Yes', ...timestamp })
-    });
-    operation = 'Create RFQ invitation email details';
-  }
-  await sapJson(response, operation);
+async function saveRfqInvitationEmailDetails({ itemUrl, headers }) {
+  const response = await fetch(itemUrl, {
+    method: 'PATCH',
+    headers: { ...headers, 'If-Match': '*' },
+    body: JSON.stringify({ EmailSent: 'Yes', ...rfqEmailDateTime(new Date()) })
+  });
+  await sapJson(response, 'Update RFQ invitation email details');
 }
 
 async function saveSupplierQuotation(req, res, cors) {
@@ -376,22 +337,17 @@ async function saveSupplierQuotation(req, res, cors) {
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error();
   } catch { return send(res, 400, JSON.stringify({ error: 'Quotation must contain a valid JSON object.' }), undefined, cors); }
   try {
-    const { supplierNumber, parent } = await resolveRfqSupplierByAccessToken(token);
     const rfqNumber = String(body.RFQNumber || '').trim();
     if (!rfqNumber || rfqNumber.length > 10) return send(res, 400, JSON.stringify({ error: 'Select a valid RFQ number.' }), undefined, cors);
+    const { supplierNumber, invitationId, rfqNumber: invitedRfq } = await resolveRfqSupplierByAccessToken(token);
+    if (invitedRfq && invitedRfq !== rfqNumber)
+      return send(res, 403, JSON.stringify({ error: 'This invitation is for a different RFQ.' }), undefined, cors);
     const bidderFilter = `RequestForQuotation eq '${rfqNumber.replace(/'/g, "''")}' and Supplier eq '${supplierNumber.replace(/'/g, "''")}'`;
     if (!(await readSapCollection(RFQ_SERVICE_ROOT, 'RFQ_Bidder', `?$filter=${encodeURIComponent(bidderFilter)}&$top=1`)).length)
       return send(res, 403, JSON.stringify({ error: 'This RFQ is not assigned to your supplier account.' }), undefined, cors);
     const rfqHeaders = await readSapCollection(RFQ_SERVICE_ROOT, 'RFQ_Header', `?$filter=${encodeURIComponent(`RequestForQuotation eq '${rfqNumber.replace(/'/g, "''")}'`)}&$top=1`);
     if (!rfqHeaders.length) return send(res, 404, JSON.stringify({ error: 'The selected RFQ no longer exists in SAP.' }), undefined, cors);
-    const { header, status } = prepareQuotation({ ...body, RFQNumber: rfqNumber }, {
-      supplierNumber,
-      supplierName: String(parent.SupplierName || ''),
-      supplierEmail: String(parent.SupplierEmail || ''),
-      accessToken: token,
-      parent,
-      rfqHeader: rfqHeaders[0]
-    });
+    const { header, status } = prepareQuotation({ ...body, RFQNumber: rfqNumber }, { invitationId, rfqHeader: rfqHeaders[0] });
     const quotationFilter = `RFQNumber eq '${rfqNumber.replace(/'/g, "''")}'`;
     const matches = await readSapCollection(RFQ_PORTAL_SERVICE_ROOT, 'YY1_RFQ_PORTAL', `?$filter=${encodeURIComponent(quotationFilter)}&$top=2`);
     if (matches.length > 1) throw new Error('SAP returned multiple CBO headers for this RFQ. Resolve the duplicate records before saving.');
@@ -414,12 +370,13 @@ async function saveSupplierQuotation(req, res, cors) {
   }
 }
 
-async function readSupplierRfqPage(supplierNumber, query) {
+async function readSupplierRfqPage({ supplierNumber, rfqNumber }, query) {
   const quoteValue = value => String(value || '').replace(/'/g, "''");
   const url = new URL(`${RFQ_SERVICE_ROOT}/RFQ_Bidder`);
   const params = new URLSearchParams(query || '');
   const suppliedFilter = params.get('$filter');
-  const bidderFilter = `Supplier eq '${quoteValue(supplierNumber)}'`;
+  let bidderFilter = `Supplier eq '${quoteValue(supplierNumber)}'`;
+  if (rfqNumber) bidderFilter += ` and RequestForQuotation eq '${quoteValue(rfqNumber)}'`;
   params.set('$filter', suppliedFilter ? `(${bidderFilter}) and (${suppliedFilter})` : bidderFilter);
   params.set('$select', 'RequestForQuotation,Supplier,SupplierName,PartnerFunction,PartnerCounter');
   params.set('$orderby', 'RequestForQuotation desc');
@@ -450,16 +407,22 @@ async function resolveRfqSupplier(rfqNumber, supplierNumber) {
   const bidderFilter = `RequestForQuotation eq '${quote(rfqNumber)}' and Supplier eq '${quote(supplierNumber)}'`;
   const bidders = await readSapCollection(RFQ_SERVICE_ROOT, 'RFQ_Bidder', `?$filter=${encodeURIComponent(bidderFilter)}&$top=1`);
   if (!bidders.length) throw Object.assign(new Error('This supplier is not listed as a bidder for the selected RFQ.'), { statusCode: 409 });
+  const bidderName = String(bidders[0].SupplierName || '').trim();
+  const fallback = { email: RFQ_FALLBACK_EMAIL, name: bidderName || supplierNumber };
   const creationFilter = `SupplierNumber eq '${quote(supplierNumber)}' or BPNumber eq '${quote(supplierNumber)}'`;
   const creations = await readSapCollection(SERVICE_ROOT, 'YY1_SAPCREATION_SUPPLIER_ONBOA', `?$filter=${encodeURIComponent(creationFilter)}&$top=50`);
   const creation = creations.find(record => record.SAP_PARENT_UUID && String(record.SupplierNumber || '').trim() === supplierNumber)
     || creations.find(record => record.SAP_PARENT_UUID && !String(record.SupplierNumber || '').trim() && String(record.BPNumber || '').trim() === supplierNumber);
-  if (!creation?.SAP_PARENT_UUID) throw Object.assign(new Error(`Supplier ${supplierNumber} has no linked portal onboarding record. Complete Supplier Registration and link its SAP supplier number before sending an RFQ invitation.`), { statusCode: 409 });
+  if (!creation) return fallback;
   const onboardingFilter = `SAP_UUID eq guid'${String(creation.SAP_PARENT_UUID).toLowerCase()}'`;
   const onboardings = await readSapCollection(SERVICE_ROOT, 'YY1_SUPPLIER_ONBOARDING', `?$filter=${encodeURIComponent(onboardingFilter)}&$top=1`);
   const onboarding = onboardings.find(record => String(record.SAP_UUID || '').toLowerCase() === String(creation.SAP_PARENT_UUID).toLowerCase());
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(onboarding?.SupplierEmail || '').trim()) || !/^[a-f0-9]{64}$/i.test(onboarding?.AccessToken || '')) throw Object.assign(new Error(`Supplier ${supplierNumber} needs a valid email address and portal access token in Supplier Registration before an RFQ invitation can be sent.`), { statusCode: 409 });
-  return { email: String(onboarding.SupplierEmail).trim(), token: String(onboarding.AccessToken).trim(), name: String(onboarding.SupplierName || bidders[0].SupplierName || 'Supplier').trim() };
+  if (!onboarding) return fallback;
+  const email = String(onboarding.SupplierEmail || '').trim();
+  const token = String(onboarding.AccessToken || '').trim();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !/^[a-f0-9]{64}$/i.test(token))
+    throw Object.assign(new Error(`Supplier ${supplierNumber} needs a valid email address and portal access token in Supplier Registration before an RFQ invitation can be sent.`), { statusCode: 409 });
+  return { email, token, name: bidderName || String(onboarding.SupplierName || '').trim() || supplierNumber };
 }
 
 function sapCountry(input) {
@@ -871,8 +834,8 @@ const server = http.createServer(async (req, res) => {
     const token = String(req.headers['x-supplier-access-token'] || '');
     if (!token) return send(res, 401, JSON.stringify({ error: 'A supplier invitation token is required.' }), undefined, cors);
     try {
-      const { supplierNumber } = await resolveRfqSupplierByAccessToken(token);
-      const page = await readSupplierRfqPage(supplierNumber, url.search);
+      const supplier = await resolveRfqSupplierByAccessToken(token);
+      const page = await readSupplierRfqPage(supplier, url.search);
       return send(res, 200, JSON.stringify(page), undefined, cors);
     } catch (error) {
       return send(res, error.statusCode || 502, JSON.stringify({ error: error.statusCode ? error.message : 'Supplier RFQ records could not be loaded from SAP.' }), undefined, cors);
@@ -892,17 +855,20 @@ const server = http.createServer(async (req, res) => {
       let upstreamUrl = `${RFQ_SERVICE_ROOT}/${entity}${url.search}`;
       const supplierToken = String(req.headers['x-supplier-access-token'] || '');
       if (supplierToken) {
-        const { supplierNumber } = await resolveRfqSupplierByAccessToken(supplierToken);
+        const { supplierNumber, rfqNumber: invitedRfq } = await resolveRfqSupplierByAccessToken(supplierToken);
         const suppliedFilter = url.searchParams.get('$filter') || '';
         if (entity === 'RFQ_Bidder') {
           const params = new URLSearchParams(url.searchParams);
-          const supplierFilter = `Supplier eq '${String(supplierNumber).replace(/'/g, "''")}'`;
+          let supplierFilter = `Supplier eq '${String(supplierNumber).replace(/'/g, "''")}'`;
+          if (invitedRfq) supplierFilter += ` and RequestForQuotation eq '${invitedRfq.replace(/'/g, "''")}'`;
           params.set('$filter', suppliedFilter ? `(${supplierFilter}) and (${suppliedFilter})` : supplierFilter);
           upstreamUrl = `${RFQ_SERVICE_ROOT}/${entity}?${params}`;
         } else {
           const requestMatch = suppliedFilter.match(/RequestForQuotation\s+eq\s+'((?:[^']|'')+)'/i);
           if (!requestMatch) return send(res, 400, JSON.stringify({ error: 'Supplier RFQ details require a specific RFQ number.' }), undefined, cors);
           const requestedNumber = requestMatch[1].replace(/''/g, "'");
+          if (invitedRfq && invitedRfq !== requestedNumber)
+            return send(res, 403, JSON.stringify({ error: 'This invitation is for a different RFQ.' }), undefined, cors);
           const bidderFilter = `RequestForQuotation eq '${String(requestedNumber).replace(/'/g, "''")}' and Supplier eq '${String(supplierNumber).replace(/'/g, "''")}'`;
           const assigned = await readSapCollection(RFQ_SERVICE_ROOT, 'RFQ_Bidder', `?$filter=${encodeURIComponent(bidderFilter)}&$top=1`);
           if (!assigned.length) return send(res, 403, JSON.stringify({ error: 'This RFQ is not assigned to this supplier.' }), undefined, cors);
@@ -1070,17 +1036,29 @@ const server = http.createServer(async (req, res) => {
     let payload;
     try {
       payload = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error();
     } catch {
       return send(res, 400, JSON.stringify({ error: 'Request must contain valid JSON.' }));
     }
+    let releaseInvitation;
     try {
-      const rfqNumber = cleanHeader(payload.rfqNumber).slice(0, 10);
-      const supplierNumber = cleanHeader(payload.supplierNumber).slice(0, 10);
-      if (!rfqNumber) return send(res, 400, JSON.stringify({ error: 'An RFQ number is required.' }));
-      if (!supplierNumber) return send(res, 400, JSON.stringify({ error: 'A bidder supplier number is required.' }));
+      const rfqNumber = cleanHeader(payload.rfqNumber);
+      const supplierNumber = cleanHeader(payload.supplierNumber);
+      if (!rfqNumber || rfqNumber.length > 10) return send(res, 400, JSON.stringify({ error: 'A valid RFQ number is required.' }));
+      if (!supplierNumber || supplierNumber.length > 10) return send(res, 400, JSON.stringify({ error: 'A valid bidder supplier number is required.' }));
       if (!SAP_USERNAME || !SAP_PASSWORD) return send(res, 503, JSON.stringify({ error: 'SAP credentials are not configured on the server.' }));
       const config = getSmtpConfig();
       if (!config.SMTP_HOST || !config.SMTP_USER || !config.SMTP_PASSWORD) return send(res, 503, JSON.stringify({ error: 'The supplierportal-smtp-credentials binding or SMTP environment variables are missing.' }));
+      // Requests for the same RFQ share a CBO header. Wait for the previous send to finish.
+      const previous = rfqInvitationQueues.get(rfqNumber);
+      let release;
+      const current = new Promise(resolve => { release = resolve; });
+      rfqInvitationQueues.set(rfqNumber, current);
+      releaseInvitation = () => {
+        if (rfqInvitationQueues.get(rfqNumber) === current) rfqInvitationQueues.delete(rfqNumber);
+        release();
+      };
+      await previous;
       let supplier;
       try { supplier = await resolveRfqSupplier(rfqNumber, supplierNumber); }
       catch (error) {
@@ -1090,9 +1068,9 @@ const server = http.createServer(async (req, res) => {
         }
         throw error;
       }
-      let parentUuid;
+      let invitation;
       try {
-        parentUuid = await prepareRfqInvitationCboData(rfqNumber, supplierNumber, supplier, payload.resend === true);
+        invitation = await prepareRfqInvitationCboData(rfqNumber, supplierNumber, supplier, payload.resend === true);
       } catch (cboError) {
         if (cboError.statusCode) throw cboError;
         throw Object.assign(new Error(`RFQ details could not be saved to the CBO before sending: ${cboError.message}`), { statusCode: 502 });
@@ -1100,15 +1078,15 @@ const server = http.createServer(async (req, res) => {
       const supplierName = cleanHeader(supplier.name).slice(0, 80) || 'Supplier';
       const senderName = cleanHeader(config.SMTP_SENDER_NAME) || 'Supplier Portal';
       const baseUrl = process.env.PORTAL_BASE_URL || `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000'}`;
-      const portalUrl = `${baseUrl.replace(/\/$/, '')}/?token=${encodeURIComponent(supplier.token)}#/rfq/rfq-inbox/${encodeURIComponent(rfqNumber)}`;
-      const deadline = cleanHeader(payload.quotationDeadline).slice(0, 80) || 'the stated deadline';
+      const portalUrl = `${baseUrl.replace(/\/$/, '')}/?token=${encodeURIComponent(invitation.token)}#/rfq/rfq-inbox/${encodeURIComponent(rfqNumber)}`;
+      const deadline = invitation.dueDate || 'the stated deadline';
       const subject = cleanHeader(`Submit Your Quotation for RFQ - ${rfqNumber}`);
       await sendMail(config, {
         from: `"${senderName}" <${config.SMTP_USER}>`, to: supplier.email, subject,
         html: `<div style="font-family:Arial,sans-serif;font-size:14px;color:#333"><p>Dear ${escapeHtml(supplierName)},</p><p>Please submit your quotation for Request for Quotation <b>${escapeHtml(rfqNumber)}</b>.</p><p>Include unit price and currency, delivery date or lead time, payment terms, quotation validity, and technical specifications or deviations.</p><p>Please submit your response by <b>${escapeHtml(deadline)}</b>.</p><p style="margin:25px 0"><a href="${escapeHtml(portalUrl)}" style="background:#123c61;color:#fff;padding:12px 24px;text-decoration:none;border-radius:4px;display:inline-block;font-weight:bold">Open Supplier Portal</a></p><p>For clarification, contact the Purchase Department.</p><p>Regards,<br>${escapeHtml(senderName)}</p></div>`
       });
       try {
-        await saveRfqInvitationEmailDetails(parentUuid);
+        await saveRfqInvitationEmailDetails(invitation);
       } catch (trackingError) {
         const error = new Error(`Invitation email was sent to ${supplier.email}, but RFQ CBO email details could not be saved: ${trackingError.message}`);
         error.emailSent = true;
@@ -1121,6 +1099,8 @@ const server = http.createServer(async (req, res) => {
       const response = { error: error.emailSent ? error.message : mailError(error) };
       if (error.emailSent) Object.assign(response, { emailSent: true, trackingSaved: false, email: error.email });
       return send(res, error.statusCode || 502, JSON.stringify(response));
+    } finally {
+      releaseInvitation?.();
     }
   }
 

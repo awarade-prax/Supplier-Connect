@@ -44,22 +44,20 @@ The service root defaults to the same host as `SAP_ODATA_SERVICE_ROOT`. Set `SAP
 - Service root: `https://<SAP host>/sap/opu/odata/sap/Z_RFQ_SUPP_PORTAL_SB`.
 - Entity sets: `RFQ_Header`, `RFQ_Bidder`, and `RFQ_Item`. The metadata marks these sets read-only.
 - The RFQ Inbox uses the header set with server-side filters and paging. Opening an RFQ reads its header, item rows, and bidder rows.
-- Bulk and detail-page email invitations verify that the recipient is an RFQ bidder, resolve the bidder's email and invitation token from the supplier onboarding and SAP Creation CBO records, then send through the existing SMTP service binding.
-- Before sending, the portal checks whether each selected RFQ already has a `YY1_RFQ_PORTAL` CBO parent. It asks once in a confirmation dialog if any exist; declining cancels the batch. For new RFQ/supplier records, the portal creates the parent with the RFQ deadline and currency and creates `to_ItemNode` rows with the RFQ item, description, requested quantity, and expected delivery date before sending the invitation.
-- After an invitation is delivered, the portal creates the `to_EmailDetails` child in `YY1_EMAILDETAILS_RFQ_PORTAL` with `EmailSend = Yes` and the send date/time. On a confirmed resend, it leaves the existing RFQ and item records unchanged and updates only the email date/time.
-- The RFQ Inbox shows email-send status, date, and time from those CBO email-details records. RFQs without a matching sent-email record show `No` with blank date and time.
+- Bulk and detail-page Send Email actions verify each bidder against `RFQ_Bidder` and use the supplier name from that record. The bidder entity has no email property. Bidders linked to Supplier Registration use its email and access token, resolved through the SAP Creation CBO. Bidders without a linked onboarding record get a token scoped to their RFQ and supplier, and the portal sends their invitations to `a.warade@praxisinfosolutions.com`.
+- Before sending, the portal creates or reuses the `YY1_RFQ_PORTAL` header by `RFQNumber`. A new header stores `RFQNumber`, `RFQdueDate`, and `Currency` from `RFQ_Header`. Each bidder has a `to_ItemNode` row with `RFQNumber`, `Supplier`, `SupplierName`, `SupplierEmail`, and `AccessToken`. If the recipient address exceeds the 30-character `SupplierEmail` limit, the item field is blank and SMTP uses the complete address. This applies to the 32-character fallback address.
+- New items start with `EmailSent = No`. After SMTP accepts an invitation, the portal updates that bidder's item to `EmailSent = Yes`, with `LastEmailSentOnDate` and `LastEmailSentatTime`. The Company view asks for confirmation when selected RFQs already have a CBO header. Retries and resends reuse the existing supplier item and its generated token.
+- The RFQ Inbox shows the most recent send recorded on a supplier item for each RFQ. RFQs without a sent item show `No` with a blank date and time.
 - The service root defaults to the same SAP host as `SAP_ODATA_SERVICE_ROOT`. Configure `SAP_RFQ_ODATA_SERVICE_ROOT` in `.env` or the Cloud Foundry app environment when it differs.
 
 ## Supplier quotation service
 
-- Metadata file: `YY1_RFQ_PORTAL_CDS.metadata.xml` (retrieved from the configured SAP tenant).
+- Metadata file: `YY1_RFQ_PORTAL_CDS.metadata.xml` (copied from the supplied `YY1_RFQ_PORTAL_CDS.xml`).
 - Service root environment variable: `SAP_RFQ_PORTAL_ODATA_SERVICE_ROOT`.
-- Headers are looked up by the semantic key `Supplier` + `RFQNumber`. New headers use POST `YY1_RFQ_PORTAL`; existing headers use PATCH `YY1_RFQ_PORTAL(guid'...')` with the stored UUID and ETag.
+- Headers are looked up by the semantic key `RFQNumber`. New headers use POST `YY1_RFQ_PORTAL`. Updates use PATCH `YY1_RFQ_PORTAL(guid'...')` with the stored UUID and ETag when available.
 - The generated `YY1_RFQ_PORTALSap_upsert` function import is not used: live read-only URI validation confirmed that a null date parameter returns `Invalid key predicate`. Entity JSON writes accept nullable dates; a live no-op header PATCH and item PATCH both returned HTTP 204 with unchanged business values on read-back.
-- `InvitationID` comes from the authenticated supplier's onboarding UUID. Supplier identity is resolved on the server; browser-supplied supplier and invitation identifiers are ignored.
-- Header dates and item `DeliveryDate` use the OData V2 JSON `/Date(milliseconds)/` representation or JSON null for blank dates. Decimal values use strings.
-- Items are created under `YY1_RFQ_PORTAL(guid'...')/to_ItemNode`. Repeated saves update existing RFQ item numbers via PATCH on `YY1_ITEMNODE_RFQ_PORTAL`, preserving ETags.
-- Header and item writes are separate requests. If an item write fails after the header succeeds, the response reports failure; retrying finds the existing header by its semantic key and updates items already saved.
+- `InvitationID` comes from the verified onboarding UUID or, for an RFQ-specific token, the verified supplier item UUID. The server resolves supplier identity and checks that the supplier is an assigned bidder before saving a quotation.
+- Header dates use the OData V2 JSON `/Date(milliseconds)/` representation or JSON null for blank dates. The current item node stores supplier invitations.
 
 ## Open purchase orders (OData V4)
 

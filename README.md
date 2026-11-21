@@ -29,7 +29,7 @@ The onboarding form is rendered inside the Supplier Registration workspace. It c
 
 Both onboarding and RFQ invitations use the same SMTP configuration. For the Google Workspace sender, set `SMTP_HOST=smtp.gmail.com` and `SMTP_PORT=587` (STARTTLS), with the mailbox address and its app password in `.env`. Restart after changing settings. Run `npm run check:mail` to verify the connection, TLS, and authentication without sending an email. This does not verify recipient acceptance or inbox delivery. Port 465 uses implicit TLS if your mail provider requires it. The office network must allow access to the configured SMTP host and port.
 
-An RFQ invitation also needs a bidder linked to a portal onboarding record through its SAP supplier number (or BP number when the supplier number is unavailable), with a valid supplier email and portal access token. HTTP 409 means these prerequisites are missing; complete or link Supplier Registration first. SMTP configuration cannot supply a missing supplier identity or access token. Existing unrelated SAP suppliers are not automatically enrolled or emailed.
+RFQ invitations use the assigned bidders in SAP. Bidders linked to Supplier Registration use their onboarding email and token. Bidders without a linked onboarding record get an RFQ-specific invitation token, and their invitations go to `a.warade@praxisinfosolutions.com`. The fallback mailbox is 32 characters long, so SAP's 30-character `SupplierEmail` field remains blank for those invitations. The full address is used for SMTP delivery.
 
 The SAP technical user needs the correct service authorizations. Configure credentials as Cloud Foundry environment variables or bind a managed credential service; do not commit secrets. For example:
 
