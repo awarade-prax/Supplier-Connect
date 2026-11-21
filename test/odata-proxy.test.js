@@ -93,14 +93,15 @@ test('OData forwarding, email workflows, and quotation draft/submission', { time
       const payload = JSON.parse(Buffer.concat(chunks));
       if (!('Status' in payload)) {
         assert.equal(req.method, 'POST');
-        assert.equal(payload.Supplier, '1001');
+        assert.equal(payload.Supplier, undefined);
+        assert.equal(payload.RFQNumber, '7000000001');
         invitationHeader = { ...payload, SAP_UUID: invitationUuid };
         res.statusCode = 201;
         return res.end(JSON.stringify({ d: invitationHeader }));
       }
       assert.deepEqual(Object.keys(payload).sort(), [...parameterNames].sort());
       assert.equal(payload.InvitationID, uuid);
-      assert.equal(payload.Supplier, '1001');
+      assert.equal(payload.Supplier, undefined);
       assert.equal(payload.QuotationValidTill, null);
       assert.equal(payload.PaymentTerms, '');
       assert.equal(payload.RFQdueDate, '/Date(1798675200000)/');
@@ -123,8 +124,17 @@ test('OData forwarding, email workflows, and quotation draft/submission', { time
         const chunks = [];
         for await (const chunk of req) chunks.push(chunk);
         const item = JSON.parse(Buffer.concat(chunks));
-        assert.equal(item.RFQItem, '00010');
-        invitationItems.push(item);
+        assert.equal(item.Supplier, '1001');
+        assert.equal(item.RFQNumber, '7000000001');
+        assert.equal(item.SupplierEmail, parent.SupplierEmail);
+        assert.equal(item.AccessToken, token);
+        assert.equal('RFQItem' in item, false);
+        if (req.method === 'PATCH') {
+          invitationItems[0] = { ...invitationItems[0], ...item };
+          res.statusCode = 204;
+          return res.end();
+        }
+        if (!invitationItems.length) invitationItems.push({ ...item, SAP_UUID: invitationUuid });
         res.statusCode = 201;
         return res.end(JSON.stringify({ d: { ...item, SAP_UUID: invitationUuid } }));
       }
@@ -132,7 +142,7 @@ test('OData forwarding, email workflows, and quotation draft/submission', { time
       const chunks = [];
       for await (const chunk of req) chunks.push(chunk);
       const item = JSON.parse(Buffer.concat(chunks));
-      assert.equal(item.DeliveryDate, `/Date(${Date.parse('2026-12-20T00:00:00Z')})/`);
+      assert.equal(item.RFQItem, '00010');
       assert.equal(typeof item.Price, 'string');
       assert.equal(req.headers['x-csrf-token'], 'test-csrf');
       if (req.method === 'POST') {
@@ -148,7 +158,13 @@ test('OData forwarding, email workflows, and quotation draft/submission', { time
     }
     if (req.method === 'GET') {
       res.setHeader('ETag', 'W/"test-etag"');
-      if (requestUrl.pathname === '/sap/YY1_ITEMNODE_RFQ_PORTAL') return res.end(JSON.stringify({ d: { results: [] } }));
+      if (requestUrl.pathname === '/sap/YY1_ITEMNODE_RFQ_PORTAL') {
+        const results = decodeURIComponent(req.url).includes('SAP_PARENT_UUID') ||
+          decodeURIComponent(req.url).includes('Supplier eq')
+          ? invitationItems
+          : [];
+        return res.end(JSON.stringify({ d: { results } }));
+      }
       if (requestUrl.pathname === '/sap/RFQ_Item') return res.end(JSON.stringify({ d: { results: [{ RequestForQuotationItem: '00010', RequestedQuantity: '5.000', DeliveryDate: '/Date(1797724800000)/' }] } }));
       if (req.url.startsWith('/sap/YY1_SAPCREATION_SUPPLIER_ONBOA')) {
         if (decodeURIComponent(req.url).includes("'no-link'")) return res.end(JSON.stringify({ d: { results: [] } }));
@@ -272,8 +288,8 @@ test('OData forwarding, email workflows, and quotation draft/submission', { time
   const submitted = await saveQuotation({ ...quotation, Status: '03' });
   assert.equal(submitted.status, 200, await submitted.text());
   assert.equal(quotationSaves, 2);
-  assert.equal(quotationItems.length, 1, 'resaving must not append duplicate items');
-  assert.equal(quotationPatches, 1);
+  assert.equal(quotationItems.length, 0, 'the revised CBO stores supplier details only and not quotation lines');
+  assert.equal(quotationPatches, 0);
   const invalid = await saveQuotation({ ...quotation, Items: [{ RFQItem: '00010', DeliveryDate: '2026-02-30' }] });
   assert.equal(invalid.status, 400);
   await invalid.arrayBuffer();
