@@ -17,9 +17,15 @@
   }
 
   async function request(path, signal) {
-    if (new URLSearchParams(location.search).has('token')) throw new Error('Open PO Report is available only in company view.');
     if (!path.startsWith('/api/open-po/')) throw new Error('Invalid report continuation URL.');
-    const response = await fetch(path, { headers: { Accept: 'application/json' }, signal });
+    const token = new URLSearchParams(location.search).get('token');
+    const inboxAccess = location.hash.toLowerCase().includes('/po/po-inbox');
+    if (inboxAccess) {
+      const requestUrl = new URL(path, location.origin);
+      requestUrl.searchParams.set('poInbox', 'true');
+      path = requestUrl.pathname + requestUrl.search;
+    }
+    const response = await fetch(path, { headers: { Accept: 'application/json', ...(inboxAccess ? { 'X-PO-Inbox-Access': 'true' } : {}), ...(token ? { 'X-Supplier-Access-Token': token } : {}) }, signal });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error?.message?.value || data.error?.message || data.error || `SAP returned HTTP ${response.status}.`);
     return data;
@@ -121,14 +127,15 @@
     await load();
   }
 
-  async function renderDetails(content, back, po) {
-    Portal.setRoute('po', 'Open PO Report', po);
+  async function renderDetails(content, back, po, options = {}) {
+    Portal.setRoute('po', options.routeTitle || 'Open PO Report', po);
     Portal.$('#page-title').textContent = `Purchase Order ${po}`;
     Portal.$('#page-subtitle').textContent = 'Header, items, receipt / invoice totals and schedule summaries';
-    content.innerHTML = `<section class="po-report po-detail"><div class="po-toolbar"><button class="button-secondary" data-po-list>‹ Open PO list</button><button class="button-secondary" data-po-retry>Refresh details</button></div><p class="po-message" role="status" aria-live="polite">Loading purchase order details…</p><div data-po-sections></div></section>`;
+    const inboxRecords = Array.isArray(options.inboxRecords) ? options.inboxRecords : [];
+    content.innerHTML = `<section class="po-report po-detail"><div class="po-toolbar"><button class="button-secondary" data-po-list>‹ ${esc(options.listLabel || 'Open PO list')}</button><button class="button-secondary" data-po-retry>Refresh details</button></div><p class="po-message" role="status" aria-live="polite">Loading purchase order details…</p>${inboxRecords.length ? `<section class="card po-section"><div class="po-section-heading"><h2>RFQ email matches</h2><span>${inboxRecords.length} invitation${inboxRecords.length === 1 ? '' : 's'}</span></div><div class="po-table-scroll" tabindex="0" role="region" aria-label="RFQ email matches"><table class="table po-table"><thead><tr><th>RFQ</th><th>Supplier</th><th>Email</th><th>Email sent</th><th>Date</th><th>Time</th></tr></thead><tbody>${inboxRecords.map(row => `<tr><td>${esc(row.RFQNumber)}</td><td>${esc(row.SupplierName || row.Supplier)}</td><td>${esc(row.SupplierEmail)}</td><td>${esc(row.EmailSent)}</td><td>${esc(format(row.LastEmailSentOnDate, { type: 'Edm.Date' }))}</td><td>${esc(row.LastEmailSentatTime || '—')}</td></tr>`).join('')}</tbody></table></div></section>` : ''}<div data-po-sections></div></section>`;
     const root = content.firstElementChild;
-    root.querySelector('[data-po-list]').onclick = () => render(content, back);
-    root.querySelector('[data-po-retry]').onclick = () => renderDetails(content, back, po);
+    root.querySelector('[data-po-list]').onclick = () => options.list || render(content, back);
+    root.querySelector('[data-po-retry]').onclick = () => renderDetails(content, back, po, options);
     const definitions = [['OpenPOHeader', 'Order overview'], ['OpenPOItem', 'Purchase order items'], ['OpenPOItemHistorySum', 'Goods receipt and invoice totals'], ['OpenPOItemScheduleSum', 'Schedule summaries']];
     const results = await Promise.allSettled(definitions.map(([entity]) => entity === 'OpenPOHeader'
       ? request(`/api/open-po/${entity}?${new URLSearchParams({ $filter: `PurchaseOrder eq ${literal(po)}`, $top: '1' })}`).then(data => data.value || [])
@@ -143,5 +150,5 @@
       return `<section class="card po-section"><div class="po-section-heading"><h2>${esc(title)}</h2><span>${rows.length} record${rows.length === 1 ? '' : 's'}</span></div>${entity === 'OpenPOHeader' ? rows.map(row => values(entity, row)).join('') || '<p class="po-empty">No open PO header found.</p>' : entity === 'OpenPOItem' ? rows.map(itemDetails).join('') || '<p class="po-empty">No open items returned.</p>' : summaryDetails(entity, rows)}</section>`;
     }).join('');
   }
-  window.OpenPoReport = { render };
+  window.OpenPoReport = { render, renderDetails };
 })();
