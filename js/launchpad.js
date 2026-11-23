@@ -44,6 +44,7 @@
 
   function loadSupplierName() {
     if (!emailMode) return Promise.resolve();
+    if (inviteToken.startsWith('rfq_')) return Promise.resolve();
     if (!supplierNameRequest) {
       const safeToken = inviteToken.replace(/'/g, "''");
       supplierNameRequest = Portal.odata('YY1_SUPPLIER_ONBOARDING', { query: `?$filter=${encodeURIComponent(`AccessToken eq '${safeToken}'`)}&$top=1` })
@@ -90,13 +91,18 @@
     Portal.$('#view-label').textContent = contextLabel;
     const items = module.id === 'registration' ? registrationItems()
       : module.id === 'rfq' && !emailMode ? module.items.filter(item => ['RFQ Inbox', 'Quotation Tracking'].includes(item[1]))
-      : module.id === 'po' && emailMode ? module.items.filter(item => item[1] !== 'Open PO Report')
+      : module.id === 'po' ? module.items.filter(item => emailMode ? item[1] !== 'Open PO Report' : item[1] !== 'PO Inbox')
       : module.items;
     content.innerHTML = `<div class="section-caption"><strong>${Portal.escapeHtml(module.subtitle)}</strong><span class="supplier-badge">${contextLabel}</span></div><div class="tile-grid row row-cols-1 row-cols-sm-2 row-cols-xl-3 row-cols-xxl-4 g-3 g-xl-4">${items.map(item => Portal.iconTile(item)).join('')}</div>`;
     Portal.bindTiles(content);
   }
 
   function showFeature(detail, updateRoute = true, recordId = '') {
+    if (current === 'po' && detail.title === 'PO Inbox') {
+      if (updateRoute) writeRoute('po', detail.title, false, recordId);
+      window.PoInbox.render(content, () => setActive('po'), recordId);
+      return;
+    }
     if (current === 'po' && detail.title === 'Open PO Report') {
       if (emailMode) { writeRoute('po', '', true); renderModule(modules.find(module => module.id === 'po')); return; }
       if (updateRoute) writeRoute('po', detail.title, false, recordId);
@@ -173,6 +179,9 @@
     const module = modules.find(entry => entry.id === id);
     const validFeature = feature && module?.items.some(item => featureSlug(item[1]) === feature) ? feature : '';
     setActive(id, validFeature, false, recordId);
+    if (emailMode && id === 'po' && !validFeature) {
+      showFeature({ title: 'PO Inbox', description: 'Open purchase orders with sent RFQ invitations' }, false);
+    }
     if (emailMode && !location.hash && validFeature) writeRoute(id, module.items.find(item => featureSlug(item[1]) === validFeature)?.[1] || '', true);
     if (feature && !validFeature) writeRoute(id, '', true);
   }

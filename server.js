@@ -19,6 +19,10 @@ const RFQ_FALLBACK_EMAIL = 'a.warade@praxisinfosolutions.com';
 const RFQ_INVITATION_TOKEN = /^rfq_[a-f0-9]{64}$/;
 const SAP_UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const rfqInvitationQueues = new Map();
+// The RFQ CBO metadata does not expose a link-opened field. Keep the successful
+// access-token events for the running portal process so PO Inbox can distinguish
+// sent-but-unopened invitations from invitations the supplier actually opened.
+const openedRfqInvitationTokens = new Set();
 const OPEN_PO_SERVICE_ROOT = (process.env.SAP_OPEN_PO_ODATA_SERVICE_ROOT || `${new URL(SERVICE_ROOT).origin}/sap/opu/odata4/sap/z_openpo_supp_portal_sb/srvd_a2x/sap/z_openpo_supp_portal_sd/0001`).replace(/\/$/, '');
 const OPEN_PO_ENTITY_SETS = new Set(['OpenPOHeader', 'OpenPOItem', 'OpenPOItemHistorySum', 'OpenPOItemScheduleSum']);
 const SAP_USERNAME = process.env.SAP_USERNAME || '';
@@ -136,6 +140,7 @@ async function resolveRfqSupplierByAccessToken(accessToken) {
     const rfqNumber = String(item?.RFQNumber || '').trim();
     if (items.length !== 1 || item.AccessToken !== accessToken || !SAP_UUID.test(item.SAP_UUID) || !supplierNumber || !rfqNumber)
       throw Object.assign(new Error('The supplier invitation token is invalid.'), { statusCode: 401 });
+    openedRfqInvitationTokens.add(accessToken);
     return { invitationId: item.SAP_UUID, supplierNumber, rfqNumber };
   }
   const parent = await getSupplierByAccessToken(accessToken);
@@ -244,6 +249,17 @@ async function findRfqEmailDetails(rfqNumbers) {
     };
   }
   return statuses;
+}
+
+async function findRfqEmailSuppliers(accessToken = '') {
+  const records = await readSapCollection(
+    RFQ_PORTAL_SERVICE_ROOT,
+    'YY1_ITEMNODE_RFQ_PORTAL',
+    `?$select=RFQNumber,Supplier,SupplierName,SupplierEmail,AccessToken,EmailSent,LastEmailSentOnDate,LastEmailSentatTime&$orderby=LastEmailSentOnDate desc,LastEmailSentatTime desc&$top=5000`
+  );
+  return records.filter(record => String(record.EmailSent || '').trim().toLowerCase() === 'yes'
+    && openedRfqInvitationTokens.has(String(record.AccessToken || '').trim())
+    && (!accessToken || String(record.AccessToken || '').trim() === accessToken));
 }
 
 async function prepareRfqInvitationCboData(rfqNumber, supplierNumber, supplier, resend) {
@@ -795,18 +811,28 @@ const server = http.createServer(async (req, res) => {
     const cors = corsHeaders(req);
     let supplierContext = Boolean(req.headers['x-supplier-access-token']) || url.searchParams.has('token');
     try { supplierContext ||= new URL(req.headers.referer).searchParams.has('token'); } catch { /* No referring page. */ }
-    if (supplierContext) return send(res, 403, JSON.stringify({ error: 'Open PO Report is available only in company view.' }), undefined, cors);
+    const poInboxAccess = req.headers['x-po-inbox-access'] === 'true' || url.searchParams.get('poInbox') === 'true';
+    if (supplierContext && !poInboxAccess) return send(res, 403, JSON.stringify({ error: 'Open PO Report is available only in company view.' }), undefined, cors);
     if (req.method === 'OPTIONS') { res.writeHead(204, cors); return res.end(); }
     if (req.method !== 'GET') return send(res, 405, JSON.stringify({ error: 'Open PO Report is read-only.' }), undefined, cors);
     const entity = url.pathname.slice('/api/open-po/'.length);
     if (!OPEN_PO_ENTITY_SETS.has(entity)) return send(res, 404, JSON.stringify({ error: 'Unknown Open PO entity.' }), undefined, cors);
     if (!SAP_USERNAME || !SAP_PASSWORD) return send(res, 503, JSON.stringify({ error: 'SAP credentials are missing.' }), undefined, cors);
-    const allowedOptions = new Set(['$filter', '$orderby', '$top', '$skip', '$count', '$skiptoken']);
+    const allowedOptions = new Set(['$filter', '$orderby', '$top', '$skip', '$count', '$skiptoken', 'poInbox']);
     if ([...url.searchParams.keys()].some(key => !allowedOptions.has(key))) return send(res, 400, JSON.stringify({ error: 'Unsupported Open PO query option.' }), undefined, cors);
     const top = Number(url.searchParams.get('$top') || 50);
     if (!Number.isInteger(top) || top < 1 || top > 100) return send(res, 400, JSON.stringify({ error: 'Open PO page size must be between 1 and 100.' }), undefined, cors);
     url.searchParams.set('$top', String(top));
     try {
+      if (supplierContext) {
+        const accessToken = String(req.headers['x-supplier-access-token'] || url.searchParams.get('token') || '').trim();
+        if (!accessToken) return send(res, 401, JSON.stringify({ error: 'A supplier invitation token is required.' }), undefined, cors);
+        const supplier = await resolveRfqSupplierByAccessToken(accessToken);
+        const supplierFilter = `Supplier eq '${String(supplier.supplierNumber).replace(/'/g, "''")}'`;
+        const requestedFilter = url.searchParams.get('$filter');
+        url.searchParams.set('$filter', requestedFilter ? `(${supplierFilter}) and (${requestedFilter})` : supplierFilter);
+      }
+      url.searchParams.delete('poInbox');
       const upstream = await fetch(`${OPEN_PO_SERVICE_ROOT}/${entity}?${url.searchParams}`, { headers: sapAuthHeaders(), signal: AbortSignal.timeout(30000) });
       const payload = await upstream.json();
       if (payload['@odata.nextLink']) {
@@ -1028,6 +1054,18 @@ const server = http.createServer(async (req, res) => {
     } catch (error) {
       console.error('RFQ CBO email details lookup failed:', error.message);
       return send(res, 502, JSON.stringify({ error: 'RFQ CBO email details could not be loaded.' }));
+    }
+  }
+
+  if (url.pathname === '/api/rfq/po-inbox') {
+    if (req.method !== 'GET') return send(res, 405, JSON.stringify({ error: 'GET is required.' }));
+    try {
+      const accessToken = String(req.headers['x-supplier-access-token'] || '').trim();
+      const records = accessToken ? await findRfqEmailSuppliers(accessToken) : [];
+      return send(res, 200, JSON.stringify({ records }));
+    } catch (error) {
+      console.error('RFQ PO inbox lookup failed:', error.message);
+      return send(res, 502, JSON.stringify({ error: 'RFQ CBO email records could not be loaded.' }));
     }
   }
 
